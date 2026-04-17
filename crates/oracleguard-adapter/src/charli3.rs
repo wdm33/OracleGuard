@@ -22,6 +22,7 @@ use minicbor::decode::Decoder;
 use oracleguard_schemas::oracle::{
     OracleFactEvalV1, OracleFactProvenanceV1, ASSET_PAIR_ADA_USD, SOURCE_CHARLI3,
 };
+use oracleguard_schemas::reason::{validate_oracle_fact_eval, DisbursementReasonCode};
 
 /// Plutus constructor tags used in the AggState datum.
 ///
@@ -278,6 +279,68 @@ pub fn normalize_aggstate_datum(
     Ok((eval, provenance))
 }
 
+/// Outcome of a full parse → validate → freshness pipeline over raw
+/// AggState datum bytes.
+///
+/// Splits the two surfaces that can reject a datum:
+///
+/// - [`NormalizeRejection::Parse`] — structural CBOR failure that does
+///   not correspond to a canonical `DisbursementReasonCode`. The
+///   underlying bytes are malformed relative to the on-chain schema.
+/// - [`NormalizeRejection::Reason`] — a typed domain reason the
+///   evaluator would emit (`OraclePriceZero`, `OracleStale`). The bytes
+///   were well-formed but the resulting fact is not authorization-
+///   usable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NormalizeRejection {
+    /// CBOR structural failure. Audit with [`Charli3ParseError`].
+    Parse(Charli3ParseError),
+    /// Typed domain reason — safe to propagate into the evaluator's
+    /// reason-code surface.
+    Reason(DisbursementReasonCode),
+}
+
+impl From<Charli3ParseError> for NormalizeRejection {
+    fn from(err: Charli3ParseError) -> Self {
+        NormalizeRejection::Parse(err)
+    }
+}
+
+impl From<DisbursementReasonCode> for NormalizeRejection {
+    fn from(code: DisbursementReasonCode) -> Self {
+        NormalizeRejection::Reason(code)
+    }
+}
+
+/// Parse, normalize, validate, and freshness-check an AggState datum
+/// in one deterministic step.
+///
+/// The stages are the fixed pipeline the evaluator needs:
+///
+/// 1. [`parse_aggstate_datum`] — reject malformed bytes as
+///    [`NormalizeRejection::Parse`].
+/// 2. Shape into `(OracleFactEvalV1, OracleFactProvenanceV1)` using
+///    the canonical asset-pair and source identifiers.
+/// 3. [`validate_oracle_fact_eval`] — reject zero price as
+///    [`DisbursementReasonCode::OraclePriceZero`].
+/// 4. [`check_freshness`] — reject expired datums as
+///    [`DisbursementReasonCode::OracleStale`].
+///
+/// `now_unix_ms` is an explicit argument so this function stays pure;
+/// the caller is responsible for reading the wall clock.
+pub fn normalize_parse_validate(
+    bytes: &[u8],
+    aggregator_utxo_ref: [u8; 32],
+    now_unix_ms: u64,
+) -> Result<(OracleFactEvalV1, OracleFactProvenanceV1), NormalizeRejection> {
+    let (eval, provenance) = normalize_aggstate_datum(bytes, aggregator_utxo_ref)?;
+    validate_oracle_fact_eval(&eval)?;
+    if check_freshness(&provenance, now_unix_ms).is_err() {
+        return Err(NormalizeRejection::Reason(DisbursementReasonCode::OracleStale));
+    }
+    Ok((eval, provenance))
+}
+
 /// Pure freshness check.
 ///
 /// `now_unix_ms` is taken as an explicit argument so this function
@@ -443,6 +506,142 @@ mod tests {
         let err2 = check_freshness(&provenance, GOLDEN_EXPIRY_MS + 60_000)
             .expect_err("past expiry is stale");
         assert_eq!(err2.now_unix_ms, GOLDEN_EXPIRY_MS + 60_000);
+    }
+
+    /// Build a synthetic AggState datum with caller-chosen integers.
+    ///
+    /// Uses the same outer CBOR frame as the live Preprod datum
+    /// (indefinite-length arrays with Constr 0 + Constr 2 wrappers
+    /// around a 3-entry definite map). This is deliberately test-only
+    /// construction — never used in the authoritative path — but it
+    /// lets us pin the rejection behavior for values the live feed
+    /// will not emit (zero, boundary values).
+    #[allow(clippy::vec_init_then_push)]
+    fn build_aggstate_cbor(price: u64, created_ms: u64, expiry_ms: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        // Constr 0 (tag 121, one-byte value)
+        out.push(0xd8);
+        out.push(0x79);
+        // Outer indefinite-length array
+        out.push(0x9f);
+        // Constr 2 (tag 123, one-byte value)
+        out.push(0xd8);
+        out.push(0x7b);
+        // Inner indefinite-length array
+        out.push(0x9f);
+        // Map with 3 entries
+        out.push(0xa3);
+        // Key 0 -> price
+        out.push(0x00);
+        encode_u64(&mut out, price);
+        // Key 1 -> created
+        out.push(0x01);
+        encode_u64(&mut out, created_ms);
+        // Key 2 -> expiry
+        out.push(0x02);
+        encode_u64(&mut out, expiry_ms);
+        // End inner and outer arrays
+        out.push(0xff);
+        out.push(0xff);
+        out
+    }
+
+    fn encode_u64(buf: &mut Vec<u8>, value: u64) {
+        if value <= 23 {
+            buf.push(value as u8);
+        } else if value <= u8::MAX as u64 {
+            buf.push(0x18);
+            buf.push(value as u8);
+        } else if value <= u16::MAX as u64 {
+            buf.push(0x19);
+            buf.extend_from_slice(&(value as u16).to_be_bytes());
+        } else if value <= u32::MAX as u64 {
+            buf.push(0x1a);
+            buf.extend_from_slice(&(value as u32).to_be_bytes());
+        } else {
+            buf.push(0x1b);
+            buf.extend_from_slice(&value.to_be_bytes());
+        }
+    }
+
+    #[test]
+    fn synthetic_builder_round_trips_golden_values() {
+        // Sanity: constructing with golden values via the test builder
+        // must match the captured golden bytes. Otherwise the builder
+        // has drifted and the zero-price / out-of-range tests below
+        // would be testing a different CBOR encoding than reality.
+        let built = build_aggstate_cbor(
+            GOLDEN_PRICE_MICROUSD,
+            GOLDEN_CREATED_MS,
+            GOLDEN_EXPIRY_MS,
+        );
+        assert_eq!(built.as_slice(), GOLDEN);
+    }
+
+    #[test]
+    fn zero_price_datum_parses_but_validate_rejects_it() {
+        use oracleguard_schemas::reason::{validate_oracle_fact_eval, DisbursementReasonCode};
+        let bytes = build_aggstate_cbor(0, GOLDEN_CREATED_MS, GOLDEN_EXPIRY_MS);
+        let datum = parse_aggstate_datum(&bytes).expect("parser accepts zero as valid integer");
+        assert_eq!(datum.price_microusd, 0);
+        let (eval, _) = normalize_aggstate_datum(&bytes, GOLDEN_UTXO_REF).expect("normalize");
+        let err = validate_oracle_fact_eval(&eval).expect_err("zero must be rejected");
+        assert_eq!(err, DisbursementReasonCode::OraclePriceZero);
+    }
+
+    #[test]
+    fn normalize_parse_validate_accepts_valid_golden() {
+        let (eval, _) = normalize_parse_validate(GOLDEN, GOLDEN_UTXO_REF, GOLDEN_CREATED_MS)
+            .expect("golden before expiry must accept");
+        assert_eq!(eval.price_microusd, GOLDEN_PRICE_MICROUSD);
+    }
+
+    #[test]
+    fn normalize_parse_validate_maps_zero_price_to_reason() {
+        use oracleguard_schemas::reason::DisbursementReasonCode;
+        let bytes = build_aggstate_cbor(0, GOLDEN_CREATED_MS, GOLDEN_EXPIRY_MS);
+        let err = normalize_parse_validate(&bytes, GOLDEN_UTXO_REF, GOLDEN_CREATED_MS)
+            .expect_err("zero price must be rejected");
+        assert_eq!(
+            err,
+            NormalizeRejection::Reason(DisbursementReasonCode::OraclePriceZero)
+        );
+    }
+
+    #[test]
+    fn normalize_parse_validate_maps_stale_to_reason() {
+        use oracleguard_schemas::reason::DisbursementReasonCode;
+        // now_ms is exactly at expiry — the datum is stale.
+        let err = normalize_parse_validate(GOLDEN, GOLDEN_UTXO_REF, GOLDEN_EXPIRY_MS)
+            .expect_err("stale datum must be rejected");
+        assert_eq!(
+            err,
+            NormalizeRejection::Reason(DisbursementReasonCode::OracleStale)
+        );
+    }
+
+    #[test]
+    fn normalize_parse_validate_surfaces_parse_error_for_malformed() {
+        let err = normalize_parse_validate(&[], GOLDEN_UTXO_REF, GOLDEN_CREATED_MS)
+            .expect_err("empty must be rejected");
+        assert_eq!(
+            err,
+            NormalizeRejection::Parse(Charli3ParseError::MalformedCbor)
+        );
+    }
+
+    #[test]
+    fn zero_price_rejection_is_deterministic_across_runs() {
+        use oracleguard_schemas::reason::{validate_oracle_fact_eval, DisbursementReasonCode};
+        let bytes = build_aggstate_cbor(0, GOLDEN_CREATED_MS, GOLDEN_EXPIRY_MS);
+        let mut results = Vec::new();
+        for _ in 0..4 {
+            let (eval, _) = normalize_aggstate_datum(&bytes, GOLDEN_UTXO_REF).expect("normalize");
+            results.push(validate_oracle_fact_eval(&eval));
+        }
+        for r in &results {
+            assert_eq!(r, &Err(DisbursementReasonCode::OraclePriceZero));
+        }
     }
 
     #[test]
