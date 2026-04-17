@@ -50,6 +50,34 @@ an explicit prohibition.
 - No crate may introduce a generic `utils` module without a bounded,
   documented purpose. Generic catch-alls are how ownership boundaries rot.
 
+## Dependency-direction policy
+
+The workspace enforces a strict dependency direction. The rules below are
+authoritative. `scripts/check_deps.sh` is the mechanical enforcer and is
+wired into CI; `scripts/check_deps_negative_demo.sh` is a spot-check demo
+that proves the enforcer rejects a forbidden edge.
+
+Allowed edges:
+
+| From                   | May depend on                                             |
+|------------------------|-----------------------------------------------------------|
+| `oracleguard-schemas`  | nothing in this workspace                                 |
+| `oracleguard-policy`   | `oracleguard-schemas`                                     |
+| `oracleguard-adapter`  | `oracleguard-schemas`, `oracleguard-policy`               |
+| `oracleguard-verifier` | `oracleguard-schemas`, `oracleguard-policy`               |
+
+Forbidden at all times:
+
+- Any edge from a lower-authority crate (adapter, verifier) being consumed
+  by a higher-authority crate (schemas, policy).
+- Any edge between adapter and verifier in either direction — they are
+  peer consumers of public semantics, not of each other.
+- Any out-of-tree `path = "..."` dependency. Private Ziranity code is not
+  a path dependency of any public crate.
+
+If `scripts/check_deps.sh` and this table ever disagree, the script is the
+source of truth; update the table to match, not the other way around.
+
 ## Private integration posture
 
 Private runtime integration (consensus hooks, runtime wiring,
