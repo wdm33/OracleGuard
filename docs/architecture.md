@@ -78,6 +78,25 @@ Forbidden at all times:
 If `scripts/check_deps.sh` and this table ever disagree, the script is the
 source of truth; update the table to match, not the other way around.
 
+## Cluster 2 landing zones
+
+Cluster 2 — Canonical Policy Identity and Intent Schema — lands its
+work in the following locations. This reference is here so reviewers
+can verify, before Cluster 2 starts, that there is no ambiguity about
+where canonical schema work belongs.
+
+- `DisbursementIntentV1` → `crates/oracleguard-schemas/src/intent.rs`
+- Canonical byte encoding primitives → `crates/oracleguard-schemas`
+- Policy identity types and `policy_ref` derivation →
+  `crates/oracleguard-schemas` (data) + `crates/oracleguard-policy` (if
+  evaluator-adjacent)
+- Reason codes for identity/intent validation →
+  `crates/oracleguard-schemas/src/reason.rs`
+- Identity and intent fixtures → `fixtures/`
+
+See `docs/cluster-1-closeout.md` for the full Cluster 1 → Cluster 2
+handoff record.
+
 ## Private integration posture
 
 Private runtime integration (consensus hooks, runtime wiring,
