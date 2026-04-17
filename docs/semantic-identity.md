@@ -48,6 +48,15 @@ Ziranity tag (`ZIRANITY_INTENT_ID_V1`, `ZIRANITY_VERIFICATION_BUNDLE_V1`,
 collide with any other domain's hash even if the hashed bytes happen
 to coincide.
 
+## Oracle fields in detail
+
+The three `oracle_fact.*` entries above are the evaluation-domain
+fields defined by `OracleFactEvalV1`. The three `oracle_provenance.*`
+entries below are the audit-only fields defined by
+`OracleFactProvenanceV1`. The full semantic contract for the split and
+the sanctioned construction pipeline is in
+[`docs/oracle-boundary.md`](oracle-boundary.md).
+
 ## Where this matters
 
 - The adapter submits intents keyed by `intent_id` — replay protection

@@ -98,6 +98,58 @@ projection) IS provenance-sensitive by design, so evidence bundles
 retain the provenance bytes. This is locked by
 `tests/provenance_non_interference.rs::full_intent_bytes_change_when_provenance_changes`.
 
+## Intent construction pattern
+
+The sanctioned pipeline for building a `DisbursementIntentV1` from a
+Charli3 AggState datum is:
+
+```
+raw CBOR bytes
+  │
+  │  oracleguard_adapter::charli3::normalize_parse_validate(bytes, utxo_ref, now_ms)
+  ▼
+(OracleFactEvalV1, OracleFactProvenanceV1)          — may also be an
+  │                                                    OraclePriceZero /
+  │                                                    OracleStale reason
+  ▼
+DisbursementIntentV1::new_v1(
+    policy_ref, allocation_id, requester_id,
+    oracle_fact = (eval half),
+    oracle_provenance = (provenance half),
+    requested_amount_lovelace, destination, asset,
+)
+```
+
+Rules for this pipeline:
+
+1. **Do not construct `OracleFactEvalV1` by hand from provenance
+   data.** The only sanctioned producers are the normalization helpers
+   in the adapter. If evidence replay needs a fixed fact, load it from
+   canonical bytes, not by copying fields out of a provenance record.
+2. **Do not construct `OracleFactProvenanceV1` from eval fields** —
+   the two structs are distinct for a reason. A provenance record
+   synthesized from eval data cannot be audited against an on-chain
+   source.
+3. **Do not place `oracle_provenance` values into the `oracle_fact`
+   slot** of `DisbursementIntentV1::new_v1` or vice versa. The fields
+   are the same integer types; the compiler cannot tell them apart.
+   The calling site is the only place this invariant is visible.
+4. **A single intent must embed exactly one matched pair** —
+   `(oracle_fact, oracle_provenance)` that came from the same
+   normalization call. Mixing a fact from one datum with provenance
+   from another is an auditability failure, not merely a style issue.
+
+A compiled end-to-end example that exercises this pipeline is at
+`crates/oracleguard-adapter/examples/build_intent_from_charli3.rs`.
+Run it with:
+
+```
+cargo run -p oracleguard-adapter --example build_intent_from_charli3
+```
+
+A doctest on `DisbursementIntentV1::new_v1` locks the eval/provenance
+placement at the constructor's call site.
+
 ## Hard rules
 
 - No free-form or stringly authoritative `source` — only the canonical

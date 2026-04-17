@@ -70,6 +70,61 @@ impl DisbursementIntentV1 {
     /// Sanctioned constructor for v1 intents. Hard-codes
     /// `intent_version = INTENT_VERSION_V1` so callers cannot silently
     /// emit an off-version intent.
+    ///
+    /// ## Oracle-boundary usage
+    ///
+    /// The `oracle_fact` and `oracle_provenance` parameters map to
+    /// disjoint roles and MUST NOT be constructed from each other or
+    /// from shared sources that blur the boundary:
+    ///
+    /// - `oracle_fact: OracleFactEvalV1` — the evaluation-domain fact.
+    ///   Participates in authorization and in `intent_id`. Must be
+    ///   produced by `oracleguard_adapter::charli3::normalize_aggstate_datum`
+    ///   (or an equivalent public normalization path) and MUST use the
+    ///   canonical identifiers from
+    ///   [`crate::oracle::ASSET_PAIR_ADA_USD`] and
+    ///   [`crate::oracle::SOURCE_CHARLI3`].
+    ///
+    /// - `oracle_provenance: OracleFactProvenanceV1` — the audit-only
+    ///   fetch metadata. Does NOT participate in authorization and is
+    ///   excluded from `intent_id` by the identity projection in
+    ///   [`crate::encoding::intent_id`].
+    ///
+    /// ```
+    /// use oracleguard_schemas::effect::{AssetIdV1, CardanoAddressV1};
+    /// use oracleguard_schemas::intent::DisbursementIntentV1;
+    /// use oracleguard_schemas::oracle::{
+    ///     OracleFactEvalV1, OracleFactProvenanceV1,
+    ///     ASSET_PAIR_ADA_USD, SOURCE_CHARLI3,
+    /// };
+    ///
+    /// // Evaluation-domain fact: canonical identifiers + integer price.
+    /// let oracle_fact = OracleFactEvalV1 {
+    ///     asset_pair: ASSET_PAIR_ADA_USD,
+    ///     price_microusd: 258_000,
+    ///     source: SOURCE_CHARLI3,
+    /// };
+    ///
+    /// // Provenance-domain metadata: creation/expiry timestamps and
+    /// // the UTxO reference we read the datum from. Audit-only.
+    /// let oracle_provenance = OracleFactProvenanceV1 {
+    ///     timestamp_unix: 1_776_428_823_000,
+    ///     expiry_unix: 1_776_429_423_000,
+    ///     aggregator_utxo_ref: [0x44; 32],
+    /// };
+    ///
+    /// let intent = DisbursementIntentV1::new_v1(
+    ///     [0x11; 32],
+    ///     [0x22; 32],
+    ///     [0x33; 32],
+    ///     oracle_fact,
+    ///     oracle_provenance,
+    ///     1_000_000_000,
+    ///     CardanoAddressV1 { bytes: [0x55; 57], length: 57 },
+    ///     AssetIdV1::ADA,
+    /// );
+    /// assert_eq!(intent.oracle_fact.price_microusd, 258_000);
+    /// ```
     #[allow(clippy::too_many_arguments)]
     pub fn new_v1(
         policy_ref: [u8; 32],
