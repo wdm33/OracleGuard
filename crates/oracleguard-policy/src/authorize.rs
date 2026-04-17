@@ -268,6 +268,48 @@ pub fn run_grant_gate(
 // Top-level three-gate composition (Cluster 5 Slice 05)
 // -------------------------------------------------------------------
 
+/// Error returned by [`AuthorizationResult::decode`].
+///
+/// The intake boundary (Cluster 6 Slice 05) reads consensus output
+/// bytes as authoritative data without reinterpretation; any failure
+/// is surfaced structurally rather than silently coerced to a Denied
+/// variant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthorizationResultDecodeError {
+    /// Input could not be decoded as a valid [`AuthorizationResult`].
+    Malformed,
+    /// Input decoded but had unconsumed trailing bytes. Trailing-byte
+    /// rejection keeps one byte sequence from meaning two things.
+    TrailingBytes,
+}
+
+impl AuthorizationResult {
+    /// Decode canonical postcard bytes back into an
+    /// [`AuthorizationResult`].
+    ///
+    /// Strict: trailing bytes after a successful decode are rejected.
+    /// This is the intake-boundary parser consumers use to read
+    /// consensus output; they MUST NOT reconstruct an
+    /// `AuthorizationResult` from a subset of bytes or from any
+    /// alternative encoding.
+    pub fn decode(bytes: &[u8]) -> Result<Self, AuthorizationResultDecodeError> {
+        let (result, remainder) = postcard::take_from_bytes::<AuthorizationResult>(bytes)
+            .map_err(|_| AuthorizationResultDecodeError::Malformed)?;
+        if !remainder.is_empty() {
+            return Err(AuthorizationResultDecodeError::TrailingBytes);
+        }
+        Ok(result)
+    }
+
+    /// Encode an [`AuthorizationResult`] to its canonical postcard
+    /// bytes. Exposed primarily for intake tests and for private-side
+    /// runtime code that needs to produce the bytes OracleGuard's
+    /// adapter will later parse.
+    pub fn encode(&self) -> Result<Vec<u8>, AuthorizationResultDecodeError> {
+        postcard::to_allocvec(self).map_err(|_| AuthorizationResultDecodeError::Malformed)
+    }
+}
+
 /// Run the full three-gate authorization closure and return a typed
 /// [`AuthorizationResult`].
 ///
@@ -1300,6 +1342,80 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ---- Cluster 6 Slice 05 — consensus output intake ----
+
+    #[test]
+    fn decode_round_trips_authorized_variant() {
+        let original = AuthorizationResult::Authorized {
+            effect: sample_effect(),
+        };
+        let bytes = original.encode().expect("encode");
+        let decoded = AuthorizationResult::decode(&bytes).expect("decode");
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn decode_round_trips_denied_variant() {
+        for (reason, gate) in [
+            (DisbursementReasonCode::PolicyNotFound, AuthorizationGate::Anchor),
+            (DisbursementReasonCode::AllocationNotFound, AuthorizationGate::Registry),
+            (DisbursementReasonCode::SubjectNotAuthorized, AuthorizationGate::Registry),
+            (DisbursementReasonCode::AssetMismatch, AuthorizationGate::Registry),
+            (DisbursementReasonCode::OracleStale, AuthorizationGate::Grant),
+            (DisbursementReasonCode::OraclePriceZero, AuthorizationGate::Grant),
+            (DisbursementReasonCode::AmountZero, AuthorizationGate::Grant),
+            (DisbursementReasonCode::ReleaseCapExceeded, AuthorizationGate::Grant),
+        ] {
+            let original = AuthorizationResult::Denied { reason, gate };
+            let bytes = original.encode().expect("encode");
+            let decoded = AuthorizationResult::decode(&bytes).expect("decode");
+            assert_eq!(decoded, original);
+        }
+    }
+
+    #[test]
+    fn decode_rejects_trailing_bytes() {
+        let original = AuthorizationResult::Authorized {
+            effect: sample_effect(),
+        };
+        let mut bytes = original.encode().expect("encode");
+        bytes.push(0x00);
+        let err = AuthorizationResult::decode(&bytes)
+            .expect_err("trailing byte must be rejected");
+        assert_eq!(err, AuthorizationResultDecodeError::TrailingBytes);
+    }
+
+    #[test]
+    fn decode_rejects_truncated_bytes() {
+        let original = AuthorizationResult::Authorized {
+            effect: sample_effect(),
+        };
+        let bytes = original.encode().expect("encode");
+        let truncated = &bytes[..bytes.len() - 1];
+        let err = AuthorizationResult::decode(truncated)
+            .expect_err("truncated input must be rejected");
+        assert_eq!(err, AuthorizationResultDecodeError::Malformed);
+    }
+
+    #[test]
+    fn decode_rejects_empty_input() {
+        let err = AuthorizationResult::decode(&[])
+            .expect_err("empty input must be rejected");
+        assert_eq!(err, AuthorizationResultDecodeError::Malformed);
+    }
+
+    #[test]
+    fn decode_is_stable_across_calls() {
+        let original = AuthorizationResult::Denied {
+            reason: DisbursementReasonCode::OracleStale,
+            gate: AuthorizationGate::Grant,
+        };
+        let bytes = original.encode().expect("encode");
+        let a = AuthorizationResult::decode(&bytes).expect("a");
+        let b = AuthorizationResult::decode(&bytes).expect("b");
+        assert_eq!(a, b);
     }
 
     #[test]
