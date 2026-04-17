@@ -81,6 +81,54 @@ pub const fn select_release_band_bps(price_microusd: u64) -> u64 {
     }
 }
 
+/// Compute the maximum releasable amount in lovelace for an allocation
+/// basis and a basis-point band.
+///
+/// The formula is `(allocation_lovelace * release_cap_bps) / 10_000`,
+/// computed with a `u128` intermediate so the multiplication cannot
+/// overflow for any pair of `u64` inputs. Floor division is the only
+/// sanctioned rounding rule — fractional lovelace never round up.
+///
+/// Returns `Some(cap)` when the final value fits in `u64`, and `None`
+/// when the post-division value exceeds `u64::MAX`. A `None` return is
+/// deterministic: the evaluator maps it to
+/// [`oracleguard_schemas::reason::DisbursementReasonCode::ReleaseCapExceeded`]
+/// in Slice 04/05. For valid bands (`≤ BASIS_POINT_SCALE`), `None` is
+/// unreachable — proven by explicit tests below and in Slice 04.
+///
+/// ```
+/// use oracleguard_policy::math::{
+///     compute_max_releasable_lovelace, BAND_HIGH_BPS, BAND_LOW_BPS, BAND_MID_BPS,
+/// };
+/// assert_eq!(
+///     compute_max_releasable_lovelace(1_000_000_000, BAND_MID_BPS),
+///     Some(750_000_000),
+/// );
+/// assert_eq!(
+///     compute_max_releasable_lovelace(1_000_000_000, BAND_HIGH_BPS),
+///     Some(1_000_000_000),
+/// );
+/// assert_eq!(
+///     compute_max_releasable_lovelace(1_000_000_000, BAND_LOW_BPS),
+///     Some(500_000_000),
+/// );
+/// ```
+#[must_use]
+pub const fn compute_max_releasable_lovelace(
+    allocation_lovelace: u64,
+    release_cap_bps: u64,
+) -> Option<u64> {
+    // `u64 * u64` always fits in `u128`, so this multiplication is
+    // total. The Option comes from the post-division downcast only.
+    let product = (allocation_lovelace as u128) * (release_cap_bps as u128);
+    let cap_u128 = product / (BASIS_POINT_SCALE as u128);
+    if cap_u128 > u64::MAX as u128 {
+        None
+    } else {
+        Some(cap_u128 as u64)
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -178,6 +226,104 @@ mod tests {
             let a = select_release_band_bps(price);
             let b = select_release_band_bps(price);
             assert_eq!(a, b, "price {price} varied across calls");
+        }
+    }
+
+    // ---- compute_max_releasable_lovelace: demo anchors ----
+
+    #[test]
+    fn demo_allocation_mid_band_yields_750_ada() {
+        // Implementation Plan §16: 1_000 ADA × 75% = 750 ADA.
+        assert_eq!(
+            compute_max_releasable_lovelace(1_000_000_000, BAND_MID_BPS),
+            Some(750_000_000),
+        );
+    }
+
+    #[test]
+    fn demo_allocation_high_band_yields_1000_ada() {
+        assert_eq!(
+            compute_max_releasable_lovelace(1_000_000_000, BAND_HIGH_BPS),
+            Some(1_000_000_000),
+        );
+    }
+
+    #[test]
+    fn demo_allocation_low_band_yields_500_ada() {
+        assert_eq!(
+            compute_max_releasable_lovelace(1_000_000_000, BAND_LOW_BPS),
+            Some(500_000_000),
+        );
+    }
+
+    // ---- compute_max_releasable_lovelace: zero inputs ----
+
+    #[test]
+    fn zero_allocation_yields_zero_cap_at_every_band() {
+        assert_eq!(compute_max_releasable_lovelace(0, BAND_LOW_BPS), Some(0));
+        assert_eq!(compute_max_releasable_lovelace(0, BAND_MID_BPS), Some(0));
+        assert_eq!(compute_max_releasable_lovelace(0, BAND_HIGH_BPS), Some(0));
+    }
+
+    #[test]
+    fn zero_bps_yields_zero_cap_for_any_allocation() {
+        assert_eq!(compute_max_releasable_lovelace(0, 0), Some(0));
+        assert_eq!(compute_max_releasable_lovelace(1, 0), Some(0));
+        assert_eq!(compute_max_releasable_lovelace(u64::MAX, 0), Some(0));
+    }
+
+    // ---- compute_max_releasable_lovelace: floor rounding ----
+
+    #[test]
+    fn division_rounds_toward_zero_when_product_is_not_divisible() {
+        // 7 * 7_500 = 52_500 / 10_000 = 5 (with remainder 2_500). Floor
+        // truncation is the only sanctioned rounding rule.
+        assert_eq!(compute_max_releasable_lovelace(7, BAND_MID_BPS), Some(5));
+    }
+
+    #[test]
+    fn division_rounds_down_not_up_on_half() {
+        // 1 * 5_000 = 5_000 / 10_000 = 0 (remainder 5_000). No banker's
+        // rounding, no half-up.
+        assert_eq!(compute_max_releasable_lovelace(1, BAND_LOW_BPS), Some(0));
+    }
+
+    // ---- compute_max_releasable_lovelace: large-value round-trip ----
+
+    #[test]
+    fn u64_max_allocation_high_band_yields_u64_max() {
+        // release_cap_bps == BASIS_POINT_SCALE means "pass allocation
+        // through unchanged". Must round-trip u64::MAX without
+        // truncation or None.
+        assert_eq!(
+            compute_max_releasable_lovelace(u64::MAX, BAND_HIGH_BPS),
+            Some(u64::MAX),
+        );
+    }
+
+    #[test]
+    fn u64_max_allocation_at_every_valid_band_is_some() {
+        // Structural guarantee: for every band the evaluator will
+        // select, the downcast is total at u64::MAX allocation.
+        assert!(compute_max_releasable_lovelace(u64::MAX, BAND_LOW_BPS).is_some());
+        assert!(compute_max_releasable_lovelace(u64::MAX, BAND_MID_BPS).is_some());
+        assert!(compute_max_releasable_lovelace(u64::MAX, BAND_HIGH_BPS).is_some());
+    }
+
+    // ---- compute_max_releasable_lovelace: determinism ----
+
+    #[test]
+    fn cap_computation_is_deterministic() {
+        for (alloc, bps) in [
+            (0u64, 0u64),
+            (1, BAND_LOW_BPS),
+            (1_000_000_000, BAND_MID_BPS),
+            (1_000_000_000, BAND_HIGH_BPS),
+            (u64::MAX, BAND_HIGH_BPS),
+        ] {
+            let a = compute_max_releasable_lovelace(alloc, bps);
+            let b = compute_max_releasable_lovelace(alloc, bps);
+            assert_eq!(a, b, "cap varied for ({alloc}, {bps})");
         }
     }
 

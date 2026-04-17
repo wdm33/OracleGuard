@@ -127,14 +127,28 @@ band function remains total so replay is well-defined for every `u64`.
 
 ## 7. Arithmetic
 
-Release-cap math is integer-only with a `u128` intermediate so
-`allocation * bps` cannot overflow for any `u64` inputs. The
-post-division downcast back to `u64` is fallible; a `None` downcast
-deterministically maps to `Deny { ReleaseCapExceeded }`. Floor division
-(integer truncation) is the only sanctioned rounding rule.
+Release-cap math is computed by
+`oracleguard_policy::math::compute_max_releasable_lovelace`:
 
-For valid bands `{5_000, 7_500, 10_000}` and any `allocation ≤ u64::MAX`,
-the downcast never fails — this is proven by explicit tests in Slice 04.
+```text
+product  = allocation_lovelace (u128) * release_cap_bps (u128)
+cap_u128 = product / BASIS_POINT_SCALE
+cap      = u64::try_from(cap_u128)   // Some | None
+```
+
+The multiplication is total because `u64 * u64` always fits in `u128`.
+The post-division downcast back to `u64` is fallible; a `None` downcast
+deterministically maps to `Deny { ReleaseCapExceeded }`. Floor division
+(integer truncation) is the only sanctioned rounding rule — fractional
+lovelace never round up.
+
+For valid bands `{BAND_LOW_BPS, BAND_MID_BPS, BAND_HIGH_BPS}` (i.e.
+`release_cap_bps ≤ BASIS_POINT_SCALE`) and any
+`allocation_lovelace ≤ u64::MAX`, the downcast never fails — this is
+proven by `u64_max_allocation_at_every_valid_band_is_some` and
+`u64_max_allocation_high_band_yields_u64_max`. The `None` branch
+exists only to make the function total on inputs outside the valid
+band set (Slice 04 exercises those cases).
 
 ## 8. Evolution
 
