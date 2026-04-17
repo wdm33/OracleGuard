@@ -16,6 +16,7 @@
 pub mod effect;
 pub mod encoding;
 pub mod evidence;
+pub mod gate;
 pub mod intent;
 pub mod oracle;
 pub mod policy;

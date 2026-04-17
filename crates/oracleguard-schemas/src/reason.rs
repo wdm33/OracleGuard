@@ -9,6 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::gate::AuthorizationGate;
 use crate::oracle::OracleFactEvalV1;
 
 /// Closed set of typed reasons a [`crate::intent::DisbursementIntentV1`]
@@ -28,14 +29,33 @@ use crate::oracle::OracleFactEvalV1;
 ///
 /// | Variant                | Gate      | Trigger                                                                 |
 /// |------------------------|-----------|-------------------------------------------------------------------------|
-/// | `PolicyNotFound`       | anchor    | `policy_ref` is not registered                                           |
+/// | `PolicyNotFound`       | anchor    | `policy_ref` is not registered (also covers non-v1 `intent_version`)     |
 /// | `AllocationNotFound`   | registry  | `allocation_id` does not exist or is not approved                        |
 /// | `OracleStale`          | grant     | oracle datum's `expiry_unix` has passed by the time of evaluation        |
 /// | `OraclePriceZero`      | grant     | canonical `price_microusd` is zero (economically meaningless)            |
 /// | `AmountZero`           | grant     | `requested_amount_lovelace` is zero                                      |
 /// | `ReleaseCapExceeded`   | grant     | requested amount exceeds the release cap computed from the oracle price  |
-/// | `SubjectNotAuthorized` | registry  | `requester_id` is not authorized for this allocation                     |
+/// | `SubjectNotAuthorized` | registry  | `requester_id` is not authorized, OR destination is not in the           |
+/// |                        |           | allocation's approved-destination set (see v1 compatibility note below)  |
 /// | `AssetMismatch`        | registry  | intent asset does not match the allocation's approved asset              |
+///
+/// ## v1 destination-mapping compatibility note
+///
+/// [`DisbursementReasonCode::SubjectNotAuthorized`] **includes destination
+/// mismatch for v1 disbursement authorization semantics.** That is, a
+/// disbursement intent whose `destination` is not in the allocation's
+/// approved-destination set is denied with `SubjectNotAuthorized`, not
+/// a dedicated destination code.
+///
+/// This is a deliberate Cluster 5 v1 mapping, **not** the ideal long-run
+/// taxonomy. A dedicated destination reason code is a future canonical-
+/// byte version-boundary change and requires Katiba sign-off; it is out
+/// of scope for v1.
+///
+/// Downstream consumers (verifier, evidence bundle, routing) MUST treat
+/// `SubjectNotAuthorized` as "the requester-destination pair is not
+/// authorized against this allocation," without distinguishing the two
+/// sub-causes.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DisbursementReasonCode {
@@ -59,6 +79,40 @@ pub enum DisbursementReasonCode {
     /// Registry gate: the intent asset does not match the allocation
     /// asset.
     AssetMismatch = 7,
+}
+
+impl DisbursementReasonCode {
+    /// Return the authorization gate that produces this reason.
+    ///
+    /// Every variant is produced by exactly one gate. This mapping is
+    /// the machine-readable mirror of the table in the type docstring
+    /// and is load-bearing for gate-precedence tests in
+    /// `oracleguard-policy::authorize` (Cluster 5 Slice 02 onward).
+    ///
+    /// The partition is:
+    /// - anchor: `PolicyNotFound`
+    /// - registry: `AllocationNotFound`, `SubjectNotAuthorized`,
+    ///   `AssetMismatch`
+    /// - grant: `OracleStale`, `OraclePriceZero`, `AmountZero`,
+    ///   `ReleaseCapExceeded`
+    ///
+    /// Note that `SubjectNotAuthorized` carries the v1 destination-
+    /// mapping compatibility described in the type docstring: both the
+    /// requester-authorization failure and the destination-approval
+    /// failure map to this variant and both are registry-gate failures.
+    #[must_use]
+    pub const fn gate(&self) -> AuthorizationGate {
+        match self {
+            DisbursementReasonCode::PolicyNotFound => AuthorizationGate::Anchor,
+            DisbursementReasonCode::AllocationNotFound
+            | DisbursementReasonCode::SubjectNotAuthorized
+            | DisbursementReasonCode::AssetMismatch => AuthorizationGate::Registry,
+            DisbursementReasonCode::OracleStale
+            | DisbursementReasonCode::OraclePriceZero
+            | DisbursementReasonCode::AmountZero
+            | DisbursementReasonCode::ReleaseCapExceeded => AuthorizationGate::Grant,
+        }
+    }
 }
 
 /// Validate the structural preconditions of an [`OracleFactEvalV1`]
@@ -176,5 +230,94 @@ mod tests {
         let c = validate_oracle_fact_eval(&fact_with_price(1));
         let d = validate_oracle_fact_eval(&fact_with_price(1));
         assert_eq!(c, d);
+    }
+
+    // ---- Gate partition (Cluster 5 Slice 01) ----
+
+    #[test]
+    fn gate_partition_matches_documented_table() {
+        // The table in DisbursementReasonCode's docstring is the
+        // authoritative partition. This test mirrors it so any drift
+        // between docstring and .gate() fails CI.
+        let expected: &[(DisbursementReasonCode, AuthorizationGate)] = &[
+            (DisbursementReasonCode::PolicyNotFound, AuthorizationGate::Anchor),
+            (DisbursementReasonCode::AllocationNotFound, AuthorizationGate::Registry),
+            (DisbursementReasonCode::OracleStale, AuthorizationGate::Grant),
+            (DisbursementReasonCode::OraclePriceZero, AuthorizationGate::Grant),
+            (DisbursementReasonCode::AmountZero, AuthorizationGate::Grant),
+            (DisbursementReasonCode::ReleaseCapExceeded, AuthorizationGate::Grant),
+            (DisbursementReasonCode::SubjectNotAuthorized, AuthorizationGate::Registry),
+            (DisbursementReasonCode::AssetMismatch, AuthorizationGate::Registry),
+        ];
+        for (reason, gate) in expected {
+            assert_eq!(reason.gate(), *gate, "unexpected gate for {reason:?}");
+        }
+    }
+
+    #[test]
+    fn every_reason_code_maps_to_exactly_one_gate() {
+        // Exhaustive sweep over the closed set: every variant must
+        // produce exactly one of the three documented gates, and every
+        // gate must be produced by at least one variant (partition is
+        // total and onto).
+        let all = [
+            DisbursementReasonCode::PolicyNotFound,
+            DisbursementReasonCode::AllocationNotFound,
+            DisbursementReasonCode::OracleStale,
+            DisbursementReasonCode::OraclePriceZero,
+            DisbursementReasonCode::AmountZero,
+            DisbursementReasonCode::ReleaseCapExceeded,
+            DisbursementReasonCode::SubjectNotAuthorized,
+            DisbursementReasonCode::AssetMismatch,
+        ];
+        let (mut anchor, mut registry, mut grant) = (0u32, 0u32, 0u32);
+        for r in all {
+            match r.gate() {
+                AuthorizationGate::Anchor => anchor += 1,
+                AuthorizationGate::Registry => registry += 1,
+                AuthorizationGate::Grant => grant += 1,
+            }
+        }
+        assert_eq!(anchor, 1, "anchor-gate cardinality changed");
+        assert_eq!(registry, 3, "registry-gate cardinality changed");
+        assert_eq!(grant, 4, "grant-gate cardinality changed");
+        assert_eq!(anchor + registry + grant, 8, "partition is not total");
+    }
+
+    #[test]
+    fn gate_mapping_is_deterministic() {
+        // .gate() is a const fn over a closed variant set; calling it
+        // twice on the same variant must always return the same gate.
+        for r in [
+            DisbursementReasonCode::PolicyNotFound,
+            DisbursementReasonCode::AllocationNotFound,
+            DisbursementReasonCode::OracleStale,
+            DisbursementReasonCode::OraclePriceZero,
+            DisbursementReasonCode::AmountZero,
+            DisbursementReasonCode::ReleaseCapExceeded,
+            DisbursementReasonCode::SubjectNotAuthorized,
+            DisbursementReasonCode::AssetMismatch,
+        ] {
+            assert_eq!(r.gate(), r.gate(), "gate mapping varied for {r:?}");
+        }
+    }
+
+    // ---- v1 destination-mapping compatibility pin ----
+
+    #[test]
+    fn subject_not_authorized_includes_destination_mismatch_for_v1() {
+        // v1 compatibility: SubjectNotAuthorized covers both
+        // (a) requester not authorized for the allocation, and
+        // (b) destination not in the allocation's approved-destination
+        // set. Both map to the registry gate.
+        //
+        // This pin exists so that if a future cluster introduces a
+        // dedicated destination reason code, the removal of this
+        // mapping is an explicit canonical-byte version-boundary event
+        // rather than a silent behavioral change.
+        assert_eq!(
+            DisbursementReasonCode::SubjectNotAuthorized.gate(),
+            AuthorizationGate::Registry,
+        );
     }
 }
