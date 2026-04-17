@@ -64,7 +64,26 @@ schema-version boundary crossing.
 
 ## Version boundary
 
-Any of the following is a canonical-byte change:
+### What v1 covers
+
+- Field set: `intent_version`, `policy_ref`, `allocation_id`,
+  `requester_id`, `oracle_fact`, `oracle_provenance`,
+  `requested_amount_lovelace`, `destination`, `asset`.
+- Version field: `intent_version: u16 = 1` (pinned as
+  `INTENT_VERSION_V1`).
+- Sanctioned constructor: `DisbursementIntentV1::new_v1` — hard-codes
+  the version so callers cannot silently emit an off-version intent.
+- Validator: `validate_intent_version` — accepts only
+  `INTENT_VERSION_V1` and returns `UnsupportedVersionError` otherwise,
+  so a wrong-version intent is a typed error, never a silent
+  pass-through.
+- Canonical bytes: pinned by `fixtures/intent_v1_golden.postcard`. The
+  `encoded_bytes_match_golden` test fails on drift.
+
+### What a v2 must do
+
+Any of the following is a canonical-byte change and therefore a
+version-boundary crossing:
 
 - adding, removing, or reordering a field in `DisbursementIntentV1`;
 - changing the width or type of a fixed-width field;
@@ -72,6 +91,14 @@ Any of the following is a canonical-byte change:
 - bumping the pinned postcard major version;
 - replacing postcard with a different encoder.
 
-Each of these requires a new versioned struct, a new golden fixture,
-and an explicit compatibility statement. The v1 surface is frozen until
-then.
+A v2 must:
+
+- introduce a new struct `DisbursementIntentV2` alongside v1 rather
+  than mutating v1;
+- pick a new domain separator (e.g. `ORACLEGUARD_DISBURSEMENT_V2`) so
+  v1 and v2 intent-ids cannot collide;
+- add its own golden fixture and round-trip tests;
+- extend `validate_intent_version` with an explicit compatibility rule.
+
+The v1 surface — type, encoding, golden bytes, domain separator — is
+frozen until a v2 crosses this boundary deliberately.

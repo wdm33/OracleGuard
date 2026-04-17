@@ -58,6 +58,62 @@ pub struct DisbursementIntentV1 {
     pub asset: AssetIdV1,
 }
 
+/// Returned by [`validate_intent_version`] when an intent carries a
+/// schema version the current code does not know how to evaluate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnsupportedVersionError {
+    pub found: u16,
+    pub expected: u16,
+}
+
+impl DisbursementIntentV1 {
+    /// Sanctioned constructor for v1 intents. Hard-codes
+    /// `intent_version = INTENT_VERSION_V1` so callers cannot silently
+    /// emit an off-version intent.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_v1(
+        policy_ref: [u8; 32],
+        allocation_id: [u8; 32],
+        requester_id: [u8; 32],
+        oracle_fact: OracleFactEvalV1,
+        oracle_provenance: OracleFactProvenanceV1,
+        requested_amount_lovelace: u64,
+        destination: CardanoAddressV1,
+        asset: AssetIdV1,
+    ) -> Self {
+        Self {
+            intent_version: INTENT_VERSION_V1,
+            policy_ref,
+            allocation_id,
+            requester_id,
+            oracle_fact,
+            oracle_provenance,
+            requested_amount_lovelace,
+            destination,
+            asset,
+        }
+    }
+}
+
+/// Accept only the currently supported schema version.
+///
+/// The MVP accepts exactly `intent_version == INTENT_VERSION_V1`.
+/// Anything else is an explicit [`UnsupportedVersionError`], not a
+/// silent pass-through, so that schema drift cannot slip past the
+/// v1 boundary.
+pub fn validate_intent_version(
+    intent: &DisbursementIntentV1,
+) -> Result<(), UnsupportedVersionError> {
+    if intent.intent_version == INTENT_VERSION_V1 {
+        Ok(())
+    } else {
+        Err(UnsupportedVersionError {
+            found: intent.intent_version,
+            expected: INTENT_VERSION_V1,
+        })
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -126,5 +182,56 @@ mod tests {
         let a = sample_intent();
         let b = a;
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn new_v1_constructor_hard_codes_version() {
+        let i = DisbursementIntentV1::new_v1(
+            [0x11; 32],
+            [0x22; 32],
+            [0x33; 32],
+            OracleFactEvalV1 {
+                asset_pair: *b"ADA/USD\0\0\0\0\0\0\0\0\0",
+                price_microusd: 450_000,
+                source: *b"charli3\0\0\0\0\0\0\0\0\0",
+            },
+            OracleFactProvenanceV1 {
+                timestamp_unix: 1,
+                expiry_unix: 2,
+                aggregator_utxo_ref: [0x44; 32],
+            },
+            1_000_000_000,
+            CardanoAddressV1 {
+                bytes: [0x55; 57],
+                length: 57,
+            },
+            AssetIdV1::ADA,
+        );
+        assert_eq!(i.intent_version, INTENT_VERSION_V1);
+    }
+
+    #[test]
+    fn validate_intent_version_accepts_v1() {
+        assert_eq!(validate_intent_version(&sample_intent()), Ok(()));
+    }
+
+    #[test]
+    fn validate_intent_version_rejects_unknown() {
+        let mut i = sample_intent();
+        i.intent_version = 2;
+        assert_eq!(
+            validate_intent_version(&i),
+            Err(UnsupportedVersionError {
+                found: 2,
+                expected: INTENT_VERSION_V1,
+            })
+        );
+    }
+
+    #[test]
+    fn validate_intent_version_rejects_zero() {
+        let mut i = sample_intent();
+        i.intent_version = 0;
+        assert!(validate_intent_version(&i).is_err());
     }
 }
