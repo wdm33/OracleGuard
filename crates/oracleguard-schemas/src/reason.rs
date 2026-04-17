@@ -125,9 +125,7 @@ impl DisbursementReasonCode {
 ///
 /// Returns `Ok(())` if the fact is structurally usable; returns the
 /// typed reason otherwise.
-pub fn validate_oracle_fact_eval(
-    fact: &OracleFactEvalV1,
-) -> Result<(), DisbursementReasonCode> {
+pub fn validate_oracle_fact_eval(fact: &OracleFactEvalV1) -> Result<(), DisbursementReasonCode> {
     if fact.price_microusd == 0 {
         return Err(DisbursementReasonCode::OraclePriceZero);
     }
@@ -208,10 +206,7 @@ mod tests {
     #[test]
     fn validate_oracle_fact_eval_accepts_nonzero_price() {
         assert_eq!(validate_oracle_fact_eval(&fact_with_price(1)), Ok(()));
-        assert_eq!(
-            validate_oracle_fact_eval(&fact_with_price(258_000)),
-            Ok(())
-        );
+        assert_eq!(validate_oracle_fact_eval(&fact_with_price(258_000)), Ok(()));
     }
 
     #[test]
@@ -240,14 +235,35 @@ mod tests {
         // authoritative partition. This test mirrors it so any drift
         // between docstring and .gate() fails CI.
         let expected: &[(DisbursementReasonCode, AuthorizationGate)] = &[
-            (DisbursementReasonCode::PolicyNotFound, AuthorizationGate::Anchor),
-            (DisbursementReasonCode::AllocationNotFound, AuthorizationGate::Registry),
-            (DisbursementReasonCode::OracleStale, AuthorizationGate::Grant),
-            (DisbursementReasonCode::OraclePriceZero, AuthorizationGate::Grant),
+            (
+                DisbursementReasonCode::PolicyNotFound,
+                AuthorizationGate::Anchor,
+            ),
+            (
+                DisbursementReasonCode::AllocationNotFound,
+                AuthorizationGate::Registry,
+            ),
+            (
+                DisbursementReasonCode::OracleStale,
+                AuthorizationGate::Grant,
+            ),
+            (
+                DisbursementReasonCode::OraclePriceZero,
+                AuthorizationGate::Grant,
+            ),
             (DisbursementReasonCode::AmountZero, AuthorizationGate::Grant),
-            (DisbursementReasonCode::ReleaseCapExceeded, AuthorizationGate::Grant),
-            (DisbursementReasonCode::SubjectNotAuthorized, AuthorizationGate::Registry),
-            (DisbursementReasonCode::AssetMismatch, AuthorizationGate::Registry),
+            (
+                DisbursementReasonCode::ReleaseCapExceeded,
+                AuthorizationGate::Grant,
+            ),
+            (
+                DisbursementReasonCode::SubjectNotAuthorized,
+                AuthorizationGate::Registry,
+            ),
+            (
+                DisbursementReasonCode::AssetMismatch,
+                AuthorizationGate::Registry,
+            ),
         ];
         for (reason, gate) in expected {
             assert_eq!(reason.gate(), *gate, "unexpected gate for {reason:?}");

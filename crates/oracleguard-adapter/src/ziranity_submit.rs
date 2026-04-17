@@ -385,8 +385,8 @@ mod tests {
         // Io error rather than silently succeeding or panicking.
         let intent = sample_intent();
         let path = Path::new("/nonexistent/oracleguard/payload/test.bin");
-        let err = write_payload_to_file(&intent, path)
-            .expect_err("missing parent directory must error");
+        let err =
+            write_payload_to_file(&intent, path).expect_err("missing parent directory must error");
         match err {
             WritePayloadError::Io(_) => {}
             WritePayloadError::Encode(e) => panic!("expected Io error, got Encode({e:?})"),
@@ -525,8 +525,7 @@ mod tests {
         // Pins the full argument vector for a representative config to
         // fixtures/routing/sample_cli_args.golden.txt. One line per
         // argument token.
-        const GOLDEN: &str =
-            include_str!("../../../fixtures/routing/sample_cli_args.golden.txt");
+        const GOLDEN: &str = include_str!("../../../fixtures/routing/sample_cli_args.golden.txt");
         let args = build_cli_args(&sample_config());
         let rendered = args.join("\n");
         assert_eq!(rendered.trim_end(), GOLDEN.trim_end());
@@ -544,8 +543,7 @@ mod tests {
         // surface SubmitError::Spawn rather than panicking or silently
         // succeeding.
         let bin = Path::new("/nonexistent/ziranity/binary/does_not_exist");
-        let err = submit_intent(bin, &sample_config())
-            .expect_err("missing binary must error");
+        let err = submit_intent(bin, &sample_config()).expect_err("missing binary must error");
         match err {
             SubmitError::Spawn(_) => {}
             SubmitError::NonZeroExit { .. } => panic!("expected Spawn, got NonZeroExit"),

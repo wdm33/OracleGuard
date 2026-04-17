@@ -18,9 +18,7 @@
 use std::cell::RefCell;
 use std::path::PathBuf;
 
-use oracleguard_adapter::cardano::{
-    CardanoTxHashV1, SettlementBackend, SettlementSubmitError,
-};
+use oracleguard_adapter::cardano::{CardanoTxHashV1, SettlementBackend, SettlementSubmitError};
 use oracleguard_adapter::intake::{
     parse_cli_receipt, render_cli_receipt, IntentReceiptV1, IntentStatus,
 };
@@ -221,14 +219,35 @@ fn guard_rejects_any_non_ada_asset() {
 #[test]
 fn deny_path_never_calls_backend_across_all_reason_codes() {
     let cases = [
-        (DisbursementReasonCode::PolicyNotFound, AuthorizationGate::Anchor),
-        (DisbursementReasonCode::AllocationNotFound, AuthorizationGate::Registry),
-        (DisbursementReasonCode::SubjectNotAuthorized, AuthorizationGate::Registry),
-        (DisbursementReasonCode::AssetMismatch, AuthorizationGate::Registry),
-        (DisbursementReasonCode::OracleStale, AuthorizationGate::Grant),
-        (DisbursementReasonCode::OraclePriceZero, AuthorizationGate::Grant),
+        (
+            DisbursementReasonCode::PolicyNotFound,
+            AuthorizationGate::Anchor,
+        ),
+        (
+            DisbursementReasonCode::AllocationNotFound,
+            AuthorizationGate::Registry,
+        ),
+        (
+            DisbursementReasonCode::SubjectNotAuthorized,
+            AuthorizationGate::Registry,
+        ),
+        (
+            DisbursementReasonCode::AssetMismatch,
+            AuthorizationGate::Registry,
+        ),
+        (
+            DisbursementReasonCode::OracleStale,
+            AuthorizationGate::Grant,
+        ),
+        (
+            DisbursementReasonCode::OraclePriceZero,
+            AuthorizationGate::Grant,
+        ),
         (DisbursementReasonCode::AmountZero, AuthorizationGate::Grant),
-        (DisbursementReasonCode::ReleaseCapExceeded, AuthorizationGate::Grant),
+        (
+            DisbursementReasonCode::ReleaseCapExceeded,
+            AuthorizationGate::Grant,
+        ),
     ];
     for (reason, gate) in cases {
         let backend = CountingFixtureBackend::new(CardanoTxHashV1([0x00; 32]));

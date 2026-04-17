@@ -162,8 +162,8 @@ pub fn parse_cli_receipt(raw: &[u8]) -> Result<IntentReceiptV1, IntakeError> {
 /// bytes OracleGuard parses without copying byte-layout knowledge.
 pub fn render_cli_receipt(receipt: &IntentReceiptV1) -> Result<Vec<u8>, IntakeError> {
     let output_bytes = receipt.output.encode()?;
-    let output_len = u32::try_from(output_bytes.len())
-        .map_err(|_| IntakeError::MalformedReceipt)?;
+    let output_len =
+        u32::try_from(output_bytes.len()).map_err(|_| IntakeError::MalformedReceipt)?;
     let mut out = Vec::with_capacity(32 + 1 + 8 + 4 + output_bytes.len());
     out.extend_from_slice(&receipt.intent_id);
     out.push(match receipt.status {
@@ -340,8 +340,7 @@ mod tests {
         let mut len_bytes = [0u8; 4];
         len_bytes.copy_from_slice(&bytes[output_len_pos..output_len_pos + 4]);
         let new_len = u32::from_le_bytes(len_bytes) + 1;
-        bytes[output_len_pos..output_len_pos + 4]
-            .copy_from_slice(&new_len.to_le_bytes());
+        bytes[output_len_pos..output_len_pos + 4].copy_from_slice(&new_len.to_le_bytes());
         bytes.push(0x00);
         // Sanity: start index still valid
         assert!(bytes.len() > output_bytes_start);

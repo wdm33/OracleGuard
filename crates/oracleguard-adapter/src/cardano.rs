@@ -51,10 +51,8 @@ use crate::settlement::SettlementRequest;
 pub trait SettlementBackend {
     /// Submit a settlement request and return the captured Cardano
     /// transaction hash on success.
-    fn submit(
-        &self,
-        request: &SettlementRequest,
-    ) -> Result<CardanoTxHashV1, SettlementSubmitError>;
+    fn submit(&self, request: &SettlementRequest)
+        -> Result<CardanoTxHashV1, SettlementSubmitError>;
 }
 
 // -------------------------------------------------------------------
@@ -432,7 +430,10 @@ mod tests {
         let mut b = sample_request();
         a.intent_id = [0x11; 32];
         b.intent_id = [0x11; 32];
-        assert_eq!(backend.signed_tx_path_for(&a), backend.signed_tx_path_for(&b));
+        assert_eq!(
+            backend.signed_tx_path_for(&a),
+            backend.signed_tx_path_for(&b)
+        );
     }
 
     #[test]
@@ -442,7 +443,10 @@ mod tests {
         let mut b = sample_request();
         a.intent_id = [0x11; 32];
         b.intent_id = [0x22; 32];
-        assert_ne!(backend.signed_tx_path_for(&a), backend.signed_tx_path_for(&b));
+        assert_ne!(
+            backend.signed_tx_path_for(&a),
+            backend.signed_tx_path_for(&b)
+        );
     }
 
     #[test]
@@ -481,13 +485,17 @@ mod tests {
             network_args: vec![],
             work_dir: PathBuf::from("/tmp/og/cardano"),
         };
-        let err = backend.submit(&sample_request()).expect_err("spawn must fail");
+        let err = backend
+            .submit(&sample_request())
+            .expect_err("spawn must fail");
         match err {
             SettlementSubmitError::Spawn(_) => {}
             SettlementSubmitError::NonZeroExit { .. } => {
                 panic!("expected Spawn, got NonZeroExit")
             }
-            SettlementSubmitError::ParseTxHash(e) => panic!("expected Spawn, got ParseTxHash({e:?})"),
+            SettlementSubmitError::ParseTxHash(e) => {
+                panic!("expected Spawn, got ParseTxHash({e:?})")
+            }
         }
     }
 }

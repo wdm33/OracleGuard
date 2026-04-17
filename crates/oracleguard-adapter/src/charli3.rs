@@ -331,7 +331,9 @@ pub fn normalize_parse_validate(
     let (eval, provenance) = normalize_aggstate_datum(bytes, aggregator_utxo_ref)?;
     validate_oracle_fact_eval(&eval)?;
     if check_freshness(&provenance, now_unix_ms).is_err() {
-        return Err(NormalizeRejection::Reason(DisbursementReasonCode::OracleStale));
+        return Err(NormalizeRejection::Reason(
+            DisbursementReasonCode::OracleStale,
+        ));
     }
     Ok((eval, provenance))
 }
@@ -450,8 +452,8 @@ mod tests {
 
     #[test]
     fn normalize_rejects_empty_input_as_malformed() {
-        let err = normalize_aggstate_datum(&[], GOLDEN_UTXO_REF)
-            .expect_err("empty must be rejected");
+        let err =
+            normalize_aggstate_datum(&[], GOLDEN_UTXO_REF).expect_err("empty must be rejected");
         assert_eq!(err, Charli3ParseError::MalformedCbor);
     }
 
@@ -543,11 +545,7 @@ mod tests {
         // must match the captured golden bytes. Otherwise the builder
         // has drifted and the zero-price / out-of-range tests below
         // would be testing a different CBOR encoding than reality.
-        let built = build_aggstate_cbor(
-            GOLDEN_PRICE_MICROUSD,
-            GOLDEN_CREATED_MS,
-            GOLDEN_EXPIRY_MS,
-        );
+        let built = build_aggstate_cbor(GOLDEN_PRICE_MICROUSD, GOLDEN_CREATED_MS, GOLDEN_EXPIRY_MS);
         assert_eq!(built.as_slice(), GOLDEN);
     }
 
@@ -628,13 +626,14 @@ mod tests {
         let b_bytes = build_aggstate_cbor(258_000, 9_999_999_999, 9_999_999_999 + 600_000);
         assert_ne!(a_bytes, b_bytes, "builder must actually differ");
 
-        let (eval_a, prov_a) =
-            normalize_aggstate_datum(&a_bytes, GOLDEN_UTXO_REF).expect("a");
-        let (eval_b, prov_b) =
-            normalize_aggstate_datum(&b_bytes, GOLDEN_UTXO_REF).expect("b");
+        let (eval_a, prov_a) = normalize_aggstate_datum(&a_bytes, GOLDEN_UTXO_REF).expect("a");
+        let (eval_b, prov_b) = normalize_aggstate_datum(&b_bytes, GOLDEN_UTXO_REF).expect("b");
 
         assert_eq!(eval_a, eval_b, "eval must be identical");
-        assert_ne!(prov_a, prov_b, "provenance must differ to make the test load-bearing");
+        assert_ne!(
+            prov_a, prov_b,
+            "provenance must differ to make the test load-bearing"
+        );
     }
 
     #[test]

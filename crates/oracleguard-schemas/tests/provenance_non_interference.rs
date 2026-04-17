@@ -102,7 +102,7 @@ fn identity_projection_omits_provenance_bytes_entirely() {
     // that size.
     let full = encode_intent(&base_intent()).expect("full");
     let identity = encode_intent_identity(&base_intent()).expect("identity");
-    let provenance_bytes = postcard::to_allocvec(&base_intent().oracle_provenance)
-        .expect("encode provenance");
+    let provenance_bytes =
+        postcard::to_allocvec(&base_intent().oracle_provenance).expect("encode provenance");
     assert_eq!(full.len(), identity.len() + provenance_bytes.len());
 }

@@ -78,65 +78,67 @@ Forbidden at all times:
 If `scripts/check_deps.sh` and this table ever disagree, the script is the
 source of truth; update the table to match, not the other way around.
 
-## Cluster 7 landing zones
+## Cluster 8 landing zones
 
-Cluster 6 — Authority Routing and Submission Boundary — is closed.
-See `docs/cluster-6-closeout.md` for the handoff record; the pinned
-surface it produced is:
+Cluster 7 — Authorized Effect and Cardano Fulfillment — is closed.
+See `docs/cluster-7-closeout.md` for the handoff record and
+`docs/fulfillment-boundary.md` for the reviewer-facing explanation.
+The pinned surface it produced is:
 
-- Fixed disbursement authority OCU constant
-  `DISBURSEMENT_OCU_ID: [u8; 32]` with its derivation recipe
-  (`DISBURSEMENT_OCU_DOMAIN`, `DISBURSEMENT_OCU_SEED`,
-  `derive_disbursement_ocu_id`) →
-  `crates/oracleguard-schemas/src/routing.rs`;
-  `fixtures/routing/disbursement_ocu_id.hex`;
-  `docs/authority-routing.md`
-- Single-authority routing rule `route(intent) -> [u8; 32]` that
-  always returns `DISBURSEMENT_OCU_ID`, with invariance tests over
-  non-authority field mutations →
-  `crates/oracleguard-schemas/src/routing.rs`
-- Canonical payload emission named alias
-  `emit_payload(intent) -> Vec<u8>` and strict `decode_intent` →
-  `crates/oracleguard-schemas/src/encoding.rs`
-- Adapter payload helpers `payload_bytes` + `write_payload_to_file`
-  (RED disk write of canonical bytes) →
-  `crates/oracleguard-adapter/src/ziranity_submit.rs`
-- CLI submission wrapper `SubmitConfig`, pure `build_cli_args`,
-  RED `submit_intent` spawning `ziranity intent submit` via
-  `std::process::Command` →
-  `crates/oracleguard-adapter/src/ziranity_submit.rs`;
-  `fixtures/routing/sample_cli_args.golden.txt`
-- Canonical `AuthorizationResult::{encode, decode}` (strict,
-  trailing-byte-rejecting postcard parser) →
-  `crates/oracleguard-policy/src/authorize.rs`
-- Adapter consensus-output intake: `IntentReceiptV1`,
-  `parse_consensus_output`, `parse_cli_receipt`, `render_cli_receipt`
-  with a structural audit test pinning no-reinterpretation →
-  `crates/oracleguard-adapter/src/intake.rs`
-- Routing/submission-boundary integration suite and CI gate →
-  `crates/oracleguard-adapter/tests/routing_boundary.rs`;
-  `scripts/check_routing_determinism.sh`
+- `AuthorizedEffectV1` pinned as the sole fulfillment-input surface
+  (expanded docstring + schema-scope golden fixture test) →
+  `crates/oracleguard-schemas/src/effect.rs`;
+  `fixtures/authorize/authorized_effect_golden.postcard`
+- Exact effect-to-settlement mapping `SettlementRequest` +
+  `settlement_request_from_effect` (pure, byte-identical field copy-
+  through; independent of authorization-provenance fields) →
+  `crates/oracleguard-adapter/src/settlement.rs`
+- ADA-only MVP fulfillment guard `guard_mvp_asset` +
+  `FulfillmentRejection::NonAdaAsset` →
+  `crates/oracleguard-adapter/src/settlement.rs`
+- Deny/no-tx closure via the single entrypoint `fulfill` +
+  `FulfillmentOutcome { Settled, DeniedUpstream, RejectedAtFulfillment }`
+  and `FulfillmentRejection::ReceiptNotCommitted` for pending
+  receipts; structural audit test pins that the production source
+  does not call any evaluator or per-gate function →
+  `crates/oracleguard-adapter/src/settlement.rs`
+- Transaction-hash capture type `CardanoTxHashV1` (32-byte
+  BLAKE2b-256, strict lowercase-hex round-trip) and the
+  `SettlementBackend` submission trait →
+  `crates/oracleguard-adapter/src/cardano.rs`;
+  `fixtures/cardano/tx_hash_sample.hex`
+- RED `CardanoCliSettlementBackend` skeleton that captures a tx id
+  via `cardano-cli transaction txid --tx-file <path>` →
+  `crates/oracleguard-adapter/src/cardano.rs`
+- Fulfillment-boundary integration suite and CI gate →
+  `crates/oracleguard-adapter/tests/fulfillment_boundary.rs`;
+  `scripts/check_fulfillment_determinism.sh`
 
-Cluster 7 — Authorized Effect and Cardano Fulfillment — lands its
+Cluster 8 — Evidence Bundle and Offline Verification — lands its
 work at:
 
-- Settlement construction — consume `IntentReceiptV1.output` matched
-  against `AuthorizationResult::Authorized { effect }` and build the
-  Cardano transaction from `AuthorizedEffectV1` fields. Do NOT re-run
-  authorization, re-derive `release_cap_basis_points`, or reshape the
-  authorized effect.
-- Denial path — on `AuthorizationResult::Denied { reason, gate }`,
-  settlement does not execute. Evidence captures `(reason, gate)`
-  verbatim; no local retry or fixup.
-- Bundle persistence — record the `(intent_bytes, receipt_bytes,
-  cardano_tx_bytes)` trail for allow; `(intent_bytes, receipt_bytes)`
-  for deny. Canonical bytes come from Cluster 6 surfaces, not from
-  fresh re-encoding.
+- Evidence capture — assemble the bundle from canonical bytes
+  already produced by Cluster 6 (intent payload) and Cluster 7
+  (`FulfillmentOutcome`). Do NOT re-encode, re-derive, or re-run
+  authorization; consume the existing surfaces verbatim.
+- Allow-path reference — record the captured `CardanoTxHashV1`
+  from `FulfillmentOutcome::Settled { tx_hash }`; do NOT attempt
+  post-hoc reconstruction from logs.
+- Deny-path reference — record `(reason, gate)` from
+  `FulfillmentOutcome::DeniedUpstream` verbatim; no translation, no
+  retry path.
+- Fulfillment-side rejection — record
+  `FulfillmentOutcome::RejectedAtFulfillment { kind }` as its own
+  evidence-bundle category; it is neither an upstream deny nor a
+  settled transaction.
+- Offline verifier — replay from canonical bytes using the public
+  semantic types; it must not redefine effect, request, or outcome
+  meaning.
 
 See `docs/cluster-1-closeout.md`, `docs/cluster-2-closeout.md`,
 `docs/cluster-3-closeout.md`, `docs/cluster-4-closeout.md`,
-`docs/cluster-5-closeout.md`, and `docs/cluster-6-closeout.md` for
-the prior handoff records.
+`docs/cluster-5-closeout.md`, `docs/cluster-6-closeout.md`, and
+`docs/cluster-7-closeout.md` for the prior handoff records.
 
 ## Private integration posture
 

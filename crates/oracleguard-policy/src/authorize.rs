@@ -31,8 +31,8 @@ use oracleguard_schemas::intent::{validate_intent_version, DisbursementIntentV1}
 use oracleguard_schemas::oracle::check_freshness;
 use oracleguard_schemas::reason::DisbursementReasonCode;
 
-use crate::evaluate::evaluate_disbursement;
 use crate::error::EvaluationResult;
+use crate::evaluate::evaluate_disbursement;
 
 /// Closed authorization result produced by the three-gate closure.
 ///
@@ -1129,9 +1129,30 @@ mod tests {
         // intrinsic .gate() is AuthorizationGate::Grant.
         for (intent, now) in [
             (sample_intent(), STALE_NOW_MS),
-            ({ let mut i = sample_intent(); i.requested_amount_lovelace = 0; i }, FRESH_NOW_MS),
-            ({ let mut i = sample_intent(); i.oracle_fact.price_microusd = 0; i }, FRESH_NOW_MS),
-            ({ let mut i = sample_intent(); i.requested_amount_lovelace = 900_000_000; i }, FRESH_NOW_MS),
+            (
+                {
+                    let mut i = sample_intent();
+                    i.requested_amount_lovelace = 0;
+                    i
+                },
+                FRESH_NOW_MS,
+            ),
+            (
+                {
+                    let mut i = sample_intent();
+                    i.oracle_fact.price_microusd = 0;
+                    i
+                },
+                FRESH_NOW_MS,
+            ),
+            (
+                {
+                    let mut i = sample_intent();
+                    i.requested_amount_lovelace = 900_000_000;
+                    i
+                },
+                FRESH_NOW_MS,
+            ),
         ] {
             let reason = run_grant_gate(&intent, DEMO_BASIS_LOVELACE, now).unwrap_err();
             assert_eq!(reason.gate(), AuthorizationGate::Grant);
@@ -1184,12 +1205,8 @@ mod tests {
     #[test]
     fn authorize_disbursement_denies_at_anchor_with_unregistered_policy() {
         let anchor = StaticAnchor { registered: &[] };
-        let r = authorize_disbursement(
-            &sample_intent(),
-            &anchor,
-            &full_ok_registry(),
-            FRESH_NOW_MS,
-        );
+        let r =
+            authorize_disbursement(&sample_intent(), &anchor, &full_ok_registry(), FRESH_NOW_MS);
         assert_eq!(
             r,
             AuthorizationResult::Denied {
@@ -1265,12 +1282,8 @@ mod tests {
     fn authorize_disbursement_anchor_failure_precedes_grant_failure() {
         // Anchor invalid AND oracle stale; anchor must win.
         let anchor = StaticAnchor { registered: &[] };
-        let r = authorize_disbursement(
-            &sample_intent(),
-            &anchor,
-            &full_ok_registry(),
-            STALE_NOW_MS,
-        );
+        let r =
+            authorize_disbursement(&sample_intent(), &anchor, &full_ok_registry(), STALE_NOW_MS);
         assert_eq!(
             r,
             AuthorizationResult::Denied {
@@ -1284,18 +1297,10 @@ mod tests {
     fn authorize_disbursement_is_deterministic() {
         let intent = sample_intent();
         for _ in 0..4 {
-            let a = authorize_disbursement(
-                &intent,
-                &ok_anchor(),
-                &full_ok_registry(),
-                FRESH_NOW_MS,
-            );
-            let b = authorize_disbursement(
-                &intent,
-                &ok_anchor(),
-                &full_ok_registry(),
-                FRESH_NOW_MS,
-            );
+            let a =
+                authorize_disbursement(&intent, &ok_anchor(), &full_ok_registry(), FRESH_NOW_MS);
+            let b =
+                authorize_disbursement(&intent, &ok_anchor(), &full_ok_registry(), FRESH_NOW_MS);
             assert_eq!(a, b);
         }
     }
@@ -1359,14 +1364,35 @@ mod tests {
     #[test]
     fn decode_round_trips_denied_variant() {
         for (reason, gate) in [
-            (DisbursementReasonCode::PolicyNotFound, AuthorizationGate::Anchor),
-            (DisbursementReasonCode::AllocationNotFound, AuthorizationGate::Registry),
-            (DisbursementReasonCode::SubjectNotAuthorized, AuthorizationGate::Registry),
-            (DisbursementReasonCode::AssetMismatch, AuthorizationGate::Registry),
-            (DisbursementReasonCode::OracleStale, AuthorizationGate::Grant),
-            (DisbursementReasonCode::OraclePriceZero, AuthorizationGate::Grant),
+            (
+                DisbursementReasonCode::PolicyNotFound,
+                AuthorizationGate::Anchor,
+            ),
+            (
+                DisbursementReasonCode::AllocationNotFound,
+                AuthorizationGate::Registry,
+            ),
+            (
+                DisbursementReasonCode::SubjectNotAuthorized,
+                AuthorizationGate::Registry,
+            ),
+            (
+                DisbursementReasonCode::AssetMismatch,
+                AuthorizationGate::Registry,
+            ),
+            (
+                DisbursementReasonCode::OracleStale,
+                AuthorizationGate::Grant,
+            ),
+            (
+                DisbursementReasonCode::OraclePriceZero,
+                AuthorizationGate::Grant,
+            ),
             (DisbursementReasonCode::AmountZero, AuthorizationGate::Grant),
-            (DisbursementReasonCode::ReleaseCapExceeded, AuthorizationGate::Grant),
+            (
+                DisbursementReasonCode::ReleaseCapExceeded,
+                AuthorizationGate::Grant,
+            ),
         ] {
             let original = AuthorizationResult::Denied { reason, gate };
             let bytes = original.encode().expect("encode");
@@ -1382,8 +1408,7 @@ mod tests {
         };
         let mut bytes = original.encode().expect("encode");
         bytes.push(0x00);
-        let err = AuthorizationResult::decode(&bytes)
-            .expect_err("trailing byte must be rejected");
+        let err = AuthorizationResult::decode(&bytes).expect_err("trailing byte must be rejected");
         assert_eq!(err, AuthorizationResultDecodeError::TrailingBytes);
     }
 
@@ -1394,15 +1419,14 @@ mod tests {
         };
         let bytes = original.encode().expect("encode");
         let truncated = &bytes[..bytes.len() - 1];
-        let err = AuthorizationResult::decode(truncated)
-            .expect_err("truncated input must be rejected");
+        let err =
+            AuthorizationResult::decode(truncated).expect_err("truncated input must be rejected");
         assert_eq!(err, AuthorizationResultDecodeError::Malformed);
     }
 
     #[test]
     fn decode_rejects_empty_input() {
-        let err = AuthorizationResult::decode(&[])
-            .expect_err("empty input must be rejected");
+        let err = AuthorizationResult::decode(&[]).expect_err("empty input must be rejected");
         assert_eq!(err, AuthorizationResultDecodeError::Malformed);
     }
 

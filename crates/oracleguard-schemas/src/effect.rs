@@ -217,7 +217,10 @@ mod tests {
             include_bytes!("../../../fixtures/authorize/authorized_effect_golden.postcard");
         let (decoded, rest) =
             postcard::take_from_bytes::<AuthorizedEffectV1>(GOLDEN).expect("decode golden");
-        assert!(rest.is_empty(), "golden fixture must have no trailing bytes");
+        assert!(
+            rest.is_empty(),
+            "golden fixture must have no trailing bytes"
+        );
         assert_eq!(decoded, sample_effect());
     }
 }

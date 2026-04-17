@@ -379,10 +379,7 @@ mod tests {
         // u64::MAX * u64::MAX fits in u128 (the largest value is
         // 2^128 - 2^65 + 1, which is < 2^128). The function must not
         // panic and must return None.
-        assert_eq!(
-            compute_max_releasable_lovelace(u64::MAX, u64::MAX),
-            None,
-        );
+        assert_eq!(compute_max_releasable_lovelace(u64::MAX, u64::MAX), None,);
     }
 
     #[test]
@@ -445,7 +442,10 @@ mod tests {
     #[test]
     fn decide_grant_is_total_at_u64_max() {
         assert_eq!(decide_grant(u64::MAX, u64::MAX), None);
-        assert_eq!(decide_grant(0, u64::MAX), Some(DisbursementReasonCode::ReleaseCapExceeded));
+        assert_eq!(
+            decide_grant(0, u64::MAX),
+            Some(DisbursementReasonCode::ReleaseCapExceeded)
+        );
         assert_eq!(decide_grant(u64::MAX, 0), None);
     }
 
@@ -490,7 +490,16 @@ mod tests {
         // compute_max_releasable_lovelace must return Some and
         // decide_grant must emit either None or ReleaseCapExceeded —
         // never panic and never emit any other reason.
-        let prices = [0u64, 1, 258_000, 349_999, 350_000, 450_000, 500_000, u64::MAX];
+        let prices = [
+            0u64,
+            1,
+            258_000,
+            349_999,
+            350_000,
+            450_000,
+            500_000,
+            u64::MAX,
+        ];
         let allocations = [0u64, 1, 1_000_000_000, u64::MAX];
         let requests = [0u64, 1, 700_000_000, 900_000_000, u64::MAX];
         for price in prices {

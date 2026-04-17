@@ -43,10 +43,8 @@ const ALLOW_REQUEST_LOVELACE: u64 = 700_000_000;
 /// Deny scenario request amount: 900 ADA (exceeds the 750 ADA cap).
 const DENY_REQUEST_LOVELACE: u64 = 900_000_000;
 
-const ALLOW_GOLDEN: &[u8] =
-    include_bytes!("../../../fixtures/eval/allow_700_ada_result.postcard");
-const DENY_GOLDEN: &[u8] =
-    include_bytes!("../../../fixtures/eval/deny_900_ada_result.postcard");
+const ALLOW_GOLDEN: &[u8] = include_bytes!("../../../fixtures/eval/allow_700_ada_result.postcard");
+const DENY_GOLDEN: &[u8] = include_bytes!("../../../fixtures/eval/deny_900_ada_result.postcard");
 
 fn demo_intent(requested_amount_lovelace: u64) -> DisbursementIntentV1 {
     DisbursementIntentV1::new_v1(
@@ -83,7 +81,10 @@ fn encode(result: &EvaluationResult) -> Vec<u8> {
 
 #[test]
 fn allow_fixture_produces_the_allow_variant() {
-    let r = evaluate_disbursement(&demo_intent(ALLOW_REQUEST_LOVELACE), DEMO_ALLOCATION_LOVELACE);
+    let r = evaluate_disbursement(
+        &demo_intent(ALLOW_REQUEST_LOVELACE),
+        DEMO_ALLOCATION_LOVELACE,
+    );
     assert_eq!(
         r,
         EvaluationResult::Allow {
@@ -95,7 +96,10 @@ fn allow_fixture_produces_the_allow_variant() {
 
 #[test]
 fn deny_fixture_produces_the_deny_variant() {
-    let r = evaluate_disbursement(&demo_intent(DENY_REQUEST_LOVELACE), DEMO_ALLOCATION_LOVELACE);
+    let r = evaluate_disbursement(
+        &demo_intent(DENY_REQUEST_LOVELACE),
+        DEMO_ALLOCATION_LOVELACE,
+    );
     assert!(matches!(r, EvaluationResult::Deny { .. }));
 }
 
@@ -103,14 +107,20 @@ fn deny_fixture_produces_the_deny_variant() {
 
 #[test]
 fn allow_fixture_produces_golden_bytes() {
-    let r = evaluate_disbursement(&demo_intent(ALLOW_REQUEST_LOVELACE), DEMO_ALLOCATION_LOVELACE);
+    let r = evaluate_disbursement(
+        &demo_intent(ALLOW_REQUEST_LOVELACE),
+        DEMO_ALLOCATION_LOVELACE,
+    );
     let bytes = encode(&r);
     assert_eq!(bytes.as_slice(), ALLOW_GOLDEN);
 }
 
 #[test]
 fn deny_fixture_produces_golden_bytes() {
-    let r = evaluate_disbursement(&demo_intent(DENY_REQUEST_LOVELACE), DEMO_ALLOCATION_LOVELACE);
+    let r = evaluate_disbursement(
+        &demo_intent(DENY_REQUEST_LOVELACE),
+        DEMO_ALLOCATION_LOVELACE,
+    );
     let bytes = encode(&r);
     assert_eq!(bytes.as_slice(), DENY_GOLDEN);
 }
@@ -158,11 +168,11 @@ fn allow_and_deny_golden_bytes_differ() {
 
 #[test]
 fn allow_golden_bytes_decode_back_to_same_result() {
-    let (decoded, remainder): (EvaluationResult, _) =
-        match postcard::take_from_bytes(ALLOW_GOLDEN) {
-            Ok(v) => v,
-            Err(e) => panic!("decode failed: {e:?}"),
-        };
+    let (decoded, remainder): (EvaluationResult, _) = match postcard::take_from_bytes(ALLOW_GOLDEN)
+    {
+        Ok(v) => v,
+        Err(e) => panic!("decode failed: {e:?}"),
+    };
     assert!(remainder.is_empty(), "golden bytes had trailing data");
     let expected = evaluate_disbursement(
         &demo_intent(ALLOW_REQUEST_LOVELACE),
@@ -173,11 +183,10 @@ fn allow_golden_bytes_decode_back_to_same_result() {
 
 #[test]
 fn deny_golden_bytes_decode_back_to_same_result() {
-    let (decoded, remainder): (EvaluationResult, _) =
-        match postcard::take_from_bytes(DENY_GOLDEN) {
-            Ok(v) => v,
-            Err(e) => panic!("decode failed: {e:?}"),
-        };
+    let (decoded, remainder): (EvaluationResult, _) = match postcard::take_from_bytes(DENY_GOLDEN) {
+        Ok(v) => v,
+        Err(e) => panic!("decode failed: {e:?}"),
+    };
     assert!(remainder.is_empty(), "golden bytes had trailing data");
     let expected = evaluate_disbursement(
         &demo_intent(DENY_REQUEST_LOVELACE),

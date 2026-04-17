@@ -449,14 +449,35 @@ mod tests {
     #[test]
     fn every_deny_reason_short_circuits_without_backend_call() {
         let cases = [
-            (DisbursementReasonCode::PolicyNotFound, AuthorizationGate::Anchor),
-            (DisbursementReasonCode::AllocationNotFound, AuthorizationGate::Registry),
-            (DisbursementReasonCode::SubjectNotAuthorized, AuthorizationGate::Registry),
-            (DisbursementReasonCode::AssetMismatch, AuthorizationGate::Registry),
-            (DisbursementReasonCode::OracleStale, AuthorizationGate::Grant),
-            (DisbursementReasonCode::OraclePriceZero, AuthorizationGate::Grant),
+            (
+                DisbursementReasonCode::PolicyNotFound,
+                AuthorizationGate::Anchor,
+            ),
+            (
+                DisbursementReasonCode::AllocationNotFound,
+                AuthorizationGate::Registry,
+            ),
+            (
+                DisbursementReasonCode::SubjectNotAuthorized,
+                AuthorizationGate::Registry,
+            ),
+            (
+                DisbursementReasonCode::AssetMismatch,
+                AuthorizationGate::Registry,
+            ),
+            (
+                DisbursementReasonCode::OracleStale,
+                AuthorizationGate::Grant,
+            ),
+            (
+                DisbursementReasonCode::OraclePriceZero,
+                AuthorizationGate::Grant,
+            ),
             (DisbursementReasonCode::AmountZero, AuthorizationGate::Grant),
-            (DisbursementReasonCode::ReleaseCapExceeded, AuthorizationGate::Grant),
+            (
+                DisbursementReasonCode::ReleaseCapExceeded,
+                AuthorizationGate::Grant,
+            ),
         ];
         for (reason, gate) in cases {
             let backend = CountingFixtureBackend::new(CardanoTxHashV1([0x00; 32]));

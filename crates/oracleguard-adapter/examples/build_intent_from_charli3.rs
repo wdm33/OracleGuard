@@ -15,8 +15,7 @@ use oracleguard_schemas::effect::{AssetIdV1, CardanoAddressV1};
 use oracleguard_schemas::encoding::{encode_intent, intent_id};
 use oracleguard_schemas::intent::DisbursementIntentV1;
 
-const AGGSTATE_GOLDEN: &[u8] =
-    include_bytes!("../../../fixtures/charli3/aggstate_v1_golden.cbor");
+const AGGSTATE_GOLDEN: &[u8] = include_bytes!("../../../fixtures/charli3/aggstate_v1_golden.cbor");
 
 fn main() {
     // The transaction id of the UTxO holding the AggState token. In a
@@ -80,7 +79,10 @@ fn main() {
     };
 
     println!("intent_version       = {}", intent.intent_version);
-    println!("oracle_fact.price    = {} microusd", intent.oracle_fact.price_microusd);
+    println!(
+        "oracle_fact.price    = {} microusd",
+        intent.oracle_fact.price_microusd
+    );
     println!(
         "oracle_provenance.ts = {} ms (audit-only)",
         intent.oracle_provenance.timestamp_unix
