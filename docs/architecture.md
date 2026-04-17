@@ -78,37 +78,45 @@ Forbidden at all times:
 If `scripts/check_deps.sh` and this table ever disagree, the script is the
 source of truth; update the table to match, not the other way around.
 
-## Cluster 4 landing zones
+## Cluster 5 landing zones
 
-Cluster 3 — Oracle Fact Normalization and Provenance Separation — is
-closed. See `docs/cluster-3-closeout.md` for the handoff record; the
-pinned surface it produced is:
+Cluster 4 — Release-Cap Evaluation Logic — is closed. See
+`docs/cluster-4-closeout.md` for the handoff record; the pinned
+surface it produced is:
 
-- `OracleFactEvalV1`, `OracleFactProvenanceV1`, canonical identifier
-  constants (`ASSET_PAIR_ADA_USD`, `SOURCE_CHARLI3`), and strict
-  canonicalizers → `crates/oracleguard-schemas/src/oracle.rs`
-- `DisbursementReasonCode` (8 variants, pinned discriminants) and
-  `validate_oracle_fact_eval` → `crates/oracleguard-schemas/src/reason.rs`
-- Charli3 AggState CBOR parser, `normalize_aggstate_datum`,
-  `normalize_parse_validate`, and `check_freshness` →
-  `crates/oracleguard-adapter/src/charli3.rs`
-- Golden AggState datum fixture (live Preprod capture) →
-  `fixtures/charli3/aggstate_v1_golden.cbor` +
-  `fixtures/charli3/aggstate_v1_golden.capture.md`
-- Oracle-boundary doc (field roles, canonical identifier mapping,
-  intent construction pattern, non-interference test map) →
-  `docs/oracle-boundary.md`
-
-Cluster 4 — Release-Cap Evaluation Logic — lands its work at:
-
-- Integer release-cap math → `crates/oracleguard-policy/src/math.rs`
+- Threshold constants (`THRESHOLD_HIGH_MICROUSD`,
+  `THRESHOLD_MID_MICROUSD`), band constants (`BAND_HIGH_BPS`,
+  `BAND_MID_BPS`, `BAND_LOW_BPS`, `BASIS_POINT_SCALE`), and the
+  pure helpers `select_release_band_bps`,
+  `compute_max_releasable_lovelace`, and `decide_grant` →
+  `crates/oracleguard-policy/src/math.rs`
 - Evaluator entry point `evaluate_disbursement` →
   `crates/oracleguard-policy/src/evaluate.rs`
-- Evaluator error surface mapping onto `DisbursementReasonCode` →
-  `crates/oracleguard-policy/src/error.rs`
+- Closed evaluator result type `EvaluationResult` (Allow / Deny with
+  typed reason code) → `crates/oracleguard-policy/src/error.rs`
+- Golden allow and deny fixtures (postcard-encoded
+  `EvaluationResult`) → `fixtures/eval/allow_700_ada_result.postcard`,
+  `fixtures/eval/deny_900_ada_result.postcard`
+- Evaluator contract and fixture docs → `docs/evaluator-contract.md`,
+  `docs/evaluator-fixtures.md`
 
-See `docs/cluster-1-closeout.md`, `docs/cluster-2-closeout.md`, and
-`docs/cluster-3-closeout.md` for the prior handoff records.
+Cluster 5 — Three-Gate Authorization Closure — lands its work at:
+
+- Anchor-gate policy-registration check (emits `PolicyNotFound` and
+  handles the non-v1 `intent_version` branch that Cluster 4 leaves as
+  a caller-side contract) — caller of `evaluate_disbursement`, not a
+  replacement for it.
+- Registry-gate allocation/subject/asset validation (emits
+  `AllocationNotFound`, `SubjectNotAuthorized`, `AssetMismatch`) —
+  produces the `allocation_basis_lovelace` argument that
+  `evaluate_disbursement` consumes.
+- Freshness check (emits `OracleStale`) continues to live in
+  `oracleguard-adapter::charli3::check_freshness`; Cluster 5 wires it
+  into the gate sequence rather than moving it into the evaluator.
+
+See `docs/cluster-1-closeout.md`, `docs/cluster-2-closeout.md`,
+`docs/cluster-3-closeout.md`, and `docs/cluster-4-closeout.md` for the
+prior handoff records.
 
 ## Private integration posture
 
