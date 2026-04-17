@@ -74,6 +74,38 @@ impl AssetIdV1 {
 /// All fields are fixed-width so canonical byte identity does not
 /// depend on heap layout. The field list is locked for v1; any change
 /// is a canonical-byte version-boundary crossing.
+///
+/// # Cluster 7 Slice 01 — fulfillment-input surface
+///
+/// `AuthorizedEffectV1` is the **sole typed input** to the Cardano
+/// fulfillment boundary owned by `oracleguard-adapter::settlement`.
+/// Settlement copies three fields verbatim into the Cardano
+/// transaction:
+///
+/// | Effect field                 | Settlement parameter |
+/// |------------------------------|----------------------|
+/// | `destination`                | Cardano output address |
+/// | `asset`                      | Cardano output asset (MVP: must equal [`AssetIdV1::ADA`]) |
+/// | `authorized_amount_lovelace` | Cardano output amount (lovelace) |
+///
+/// `policy_ref`, `allocation_id`, `requester_id`, and
+/// `release_cap_basis_points` are authorization-provenance fields; they
+/// MUST NOT influence the Cardano output. The fulfillment boundary's
+/// exact-copy rule is pinned by
+/// `oracleguard_adapter::settlement::settlement_request_from_effect`
+/// and exercised in the `fulfillment_boundary` integration suite.
+///
+/// ## Hard prohibitions downstream of this type
+///
+/// - No adapter or verifier crate may define an alternative
+///   execution-command surface. This struct is the only typed
+///   authorized-effect input.
+/// - No fulfillment path may re-run authorization, re-derive
+///   `release_cap_basis_points`, reinterpret `destination`, or
+///   substitute an asset.
+/// - No silent normalization — including "just to canonicalize the
+///   address" — is permitted between this struct and the emitted
+///   transaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AuthorizedEffectV1 {
     /// 32-byte governing-policy identity, byte-identical to the
@@ -173,5 +205,19 @@ mod tests {
         let a = sample_effect();
         let b = a;
         assert_eq!(a, b);
+    }
+
+    /// Cluster 7 Slice 01 — the schemas crate must independently pin
+    /// the demo effect's canonical bytes against the shared fixture so
+    /// the fixture↔struct identity is asserted at the authority crate,
+    /// not only from the policy crate.
+    #[test]
+    fn authorized_effect_golden_fixture_decodes_to_canonical_demo_effect() {
+        const GOLDEN: &[u8] =
+            include_bytes!("../../../fixtures/authorize/authorized_effect_golden.postcard");
+        let (decoded, rest) =
+            postcard::take_from_bytes::<AuthorizedEffectV1>(GOLDEN).expect("decode golden");
+        assert!(rest.is_empty(), "golden fixture must have no trailing bytes");
+        assert_eq!(decoded, sample_effect());
     }
 }
