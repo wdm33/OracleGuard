@@ -14,6 +14,7 @@
 #![deny(clippy::dbg_macro)]
 
 pub mod effect;
+pub mod encoding;
 pub mod evidence;
 pub mod intent;
 pub mod oracle;
