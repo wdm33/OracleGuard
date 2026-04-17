@@ -78,55 +78,65 @@ Forbidden at all times:
 If `scripts/check_deps.sh` and this table ever disagree, the script is the
 source of truth; update the table to match, not the other way around.
 
-## Cluster 6 landing zones
+## Cluster 7 landing zones
 
-Cluster 5 — Three-Gate Authorization Closure — is closed. See
-`docs/cluster-5-closeout.md` for the handoff record; the pinned
+Cluster 6 — Authority Routing and Submission Boundary — is closed.
+See `docs/cluster-6-closeout.md` for the handoff record; the pinned
 surface it produced is:
 
-- Gate taxonomy `AuthorizationGate` (three `repr(u8)` variants) and
-  the `DisbursementReasonCode::gate()` const partition →
-  `crates/oracleguard-schemas/src/gate.rs`,
-  `crates/oracleguard-schemas/src/reason.rs`
-- Canonical authorized-effect wire type `AuthorizedEffectV1` →
-  `crates/oracleguard-schemas/src/effect.rs`
-- Pure freshness helpers `check_freshness` and the `OracleStale` error
-  type (moved from the adapter in Slice 05) →
-  `crates/oracleguard-schemas/src/oracle.rs` (the adapter re-exports
-  both to keep its public API stable)
-- Pure trait boundaries `PolicyAnchorView`, `AllocationRegistryView`,
-  and `AllocationFacts` →
+- Fixed disbursement authority OCU constant
+  `DISBURSEMENT_OCU_ID: [u8; 32]` with its derivation recipe
+  (`DISBURSEMENT_OCU_DOMAIN`, `DISBURSEMENT_OCU_SEED`,
+  `derive_disbursement_ocu_id`) →
+  `crates/oracleguard-schemas/src/routing.rs`;
+  `fixtures/routing/disbursement_ocu_id.hex`;
+  `docs/authority-routing.md`
+- Single-authority routing rule `route(intent) -> [u8; 32]` that
+  always returns `DISBURSEMENT_OCU_ID`, with invariance tests over
+  non-authority field mutations →
+  `crates/oracleguard-schemas/src/routing.rs`
+- Canonical payload emission named alias
+  `emit_payload(intent) -> Vec<u8>` and strict `decode_intent` →
+  `crates/oracleguard-schemas/src/encoding.rs`
+- Adapter payload helpers `payload_bytes` + `write_payload_to_file`
+  (RED disk write of canonical bytes) →
+  `crates/oracleguard-adapter/src/ziranity_submit.rs`
+- CLI submission wrapper `SubmitConfig`, pure `build_cli_args`,
+  RED `submit_intent` spawning `ziranity intent submit` via
+  `std::process::Command` →
+  `crates/oracleguard-adapter/src/ziranity_submit.rs`;
+  `fixtures/routing/sample_cli_args.golden.txt`
+- Canonical `AuthorizationResult::{encode, decode}` (strict,
+  trailing-byte-rejecting postcard parser) →
   `crates/oracleguard-policy/src/authorize.rs`
-- Per-gate pure functions `run_anchor_gate`, `run_registry_gate`,
-  `run_grant_gate` →
-  `crates/oracleguard-policy/src/authorize.rs`
-- Top-level orchestrator `authorize_disbursement(intent, anchor,
-  registry, now_unix_ms) -> AuthorizationResult` and the closed
-  `AuthorizationResult` type → `crates/oracleguard-policy/src/authorize.rs`
-- Golden authorized-effect fixture (postcard-encoded
-  `AuthorizedEffectV1`) →
-  `fixtures/authorize/authorized_effect_golden.postcard`
-- Gate documentation (authoritative order, within-gate precedence,
-  reason-to-gate partition, v1 destination-mapping compatibility) →
-  `docs/authorization-gates.md`
+- Adapter consensus-output intake: `IntentReceiptV1`,
+  `parse_consensus_output`, `parse_cli_receipt`, `render_cli_receipt`
+  with a structural audit test pinning no-reinterpretation →
+  `crates/oracleguard-adapter/src/intake.rs`
+- Routing/submission-boundary integration suite and CI gate →
+  `crates/oracleguard-adapter/tests/routing_boundary.rs`;
+  `scripts/check_routing_determinism.sh`
 
-Cluster 6 — Authority Routing and Submission Boundary — lands its
+Cluster 7 — Authorized Effect and Cardano Fulfillment — lands its
 work at:
 
-- Routing / dispatch — consume `AuthorizationResult::Authorized { effect }`
-  and route on the already-validated `effect.asset` and destination.
-  Do NOT re-run any gate; do NOT re-derive routing from `intent`
-  fields the registry gate has already cleared.
-- Submission envelope — the adapter's Ziranity CLI shell builds the
-  envelope around `AuthorizedEffectV1` canonical bytes. The domain
-  separator `ORACLEGUARD_DISBURSEMENT_V1` and the well-known
-  disbursement OCU constant remain the Ziranity-side contract.
-- Evidence bundle — persist the `(intent_bytes, AuthorizationResult)`
-  pair; on denial the bundle carries `(reason, gate)` and no effect.
+- Settlement construction — consume `IntentReceiptV1.output` matched
+  against `AuthorizationResult::Authorized { effect }` and build the
+  Cardano transaction from `AuthorizedEffectV1` fields. Do NOT re-run
+  authorization, re-derive `release_cap_basis_points`, or reshape the
+  authorized effect.
+- Denial path — on `AuthorizationResult::Denied { reason, gate }`,
+  settlement does not execute. Evidence captures `(reason, gate)`
+  verbatim; no local retry or fixup.
+- Bundle persistence — record the `(intent_bytes, receipt_bytes,
+  cardano_tx_bytes)` trail for allow; `(intent_bytes, receipt_bytes)`
+  for deny. Canonical bytes come from Cluster 6 surfaces, not from
+  fresh re-encoding.
 
 See `docs/cluster-1-closeout.md`, `docs/cluster-2-closeout.md`,
-`docs/cluster-3-closeout.md`, `docs/cluster-4-closeout.md`, and
-`docs/cluster-5-closeout.md` for the prior handoff records.
+`docs/cluster-3-closeout.md`, `docs/cluster-4-closeout.md`,
+`docs/cluster-5-closeout.md`, and `docs/cluster-6-closeout.md` for
+the prior handoff records.
 
 ## Private integration posture
 
