@@ -78,23 +78,34 @@ Forbidden at all times:
 If `scripts/check_deps.sh` and this table ever disagree, the script is the
 source of truth; update the table to match, not the other way around.
 
-## Cluster 2 landing zones
+## Cluster 3 landing zones
 
-Cluster 2 — Canonical Policy Identity and Intent Schema — lands its
-work in the following locations. This reference is here so reviewers
-can verify, before Cluster 2 starts, that there is no ambiguity about
-where canonical schema work belongs.
+Cluster 2 — Canonical Policy Identity and Intent Schema — is closed.
+See `docs/cluster-2-closeout.md` for the handoff record; the pinned
+surface it produced is:
 
-- `DisbursementIntentV1` → `crates/oracleguard-schemas/src/intent.rs`
-- Canonical byte encoding primitives → `crates/oracleguard-schemas`
-- Policy identity types and `policy_ref` derivation →
-  `crates/oracleguard-schemas` (data) + `crates/oracleguard-policy` (if
-  evaluator-adjacent)
-- Reason codes for identity/intent validation →
+- `DisbursementIntentV1`, `OracleFactEvalV1`, `OracleFactProvenanceV1`,
+  `CardanoAddressV1`, `AssetIdV1` → `crates/oracleguard-schemas/src/`
+- Canonical `postcard` encoding and BLAKE3-keyed `intent_id` →
+  `crates/oracleguard-schemas/src/encoding.rs`
+- `PolicyRef` and `derive_policy_ref` →
+  `crates/oracleguard-schemas/src/policy.rs`
+- Golden fixtures → `fixtures/policy_v1.canonical.bytes`,
+  `fixtures/intent_v1_golden.postcard`
+
+Cluster 3 — Oracle Fact Normalization and Provenance Separation — lands
+its work at:
+
+- Oracle normalization semantics refinement →
+  `crates/oracleguard-schemas/src/oracle.rs`
+- Charli3 microusd normalization shell →
+  `crates/oracleguard-adapter/src/charli3.rs`
+- Deterministic rejection reason codes → extend
   `crates/oracleguard-schemas/src/reason.rs`
-- Identity and intent fixtures → `fixtures/`
+- Oracle-related fixtures → `fixtures/`
 
-See `docs/cluster-1-closeout.md` for the full Cluster 1 → Cluster 2
+See `docs/cluster-1-closeout.md` for the Cluster 1 → Cluster 2 handoff
+record and `docs/cluster-2-closeout.md` for the Cluster 2 → Cluster 3
 handoff record.
 
 ## Private integration posture
