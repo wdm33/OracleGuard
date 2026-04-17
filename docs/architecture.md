@@ -78,45 +78,55 @@ Forbidden at all times:
 If `scripts/check_deps.sh` and this table ever disagree, the script is the
 source of truth; update the table to match, not the other way around.
 
-## Cluster 5 landing zones
+## Cluster 6 landing zones
 
-Cluster 4 — Release-Cap Evaluation Logic — is closed. See
-`docs/cluster-4-closeout.md` for the handoff record; the pinned
+Cluster 5 — Three-Gate Authorization Closure — is closed. See
+`docs/cluster-5-closeout.md` for the handoff record; the pinned
 surface it produced is:
 
-- Threshold constants (`THRESHOLD_HIGH_MICROUSD`,
-  `THRESHOLD_MID_MICROUSD`), band constants (`BAND_HIGH_BPS`,
-  `BAND_MID_BPS`, `BAND_LOW_BPS`, `BASIS_POINT_SCALE`), and the
-  pure helpers `select_release_band_bps`,
-  `compute_max_releasable_lovelace`, and `decide_grant` →
-  `crates/oracleguard-policy/src/math.rs`
-- Evaluator entry point `evaluate_disbursement` →
-  `crates/oracleguard-policy/src/evaluate.rs`
-- Closed evaluator result type `EvaluationResult` (Allow / Deny with
-  typed reason code) → `crates/oracleguard-policy/src/error.rs`
-- Golden allow and deny fixtures (postcard-encoded
-  `EvaluationResult`) → `fixtures/eval/allow_700_ada_result.postcard`,
-  `fixtures/eval/deny_900_ada_result.postcard`
-- Evaluator contract and fixture docs → `docs/evaluator-contract.md`,
-  `docs/evaluator-fixtures.md`
+- Gate taxonomy `AuthorizationGate` (three `repr(u8)` variants) and
+  the `DisbursementReasonCode::gate()` const partition →
+  `crates/oracleguard-schemas/src/gate.rs`,
+  `crates/oracleguard-schemas/src/reason.rs`
+- Canonical authorized-effect wire type `AuthorizedEffectV1` →
+  `crates/oracleguard-schemas/src/effect.rs`
+- Pure freshness helpers `check_freshness` and the `OracleStale` error
+  type (moved from the adapter in Slice 05) →
+  `crates/oracleguard-schemas/src/oracle.rs` (the adapter re-exports
+  both to keep its public API stable)
+- Pure trait boundaries `PolicyAnchorView`, `AllocationRegistryView`,
+  and `AllocationFacts` →
+  `crates/oracleguard-policy/src/authorize.rs`
+- Per-gate pure functions `run_anchor_gate`, `run_registry_gate`,
+  `run_grant_gate` →
+  `crates/oracleguard-policy/src/authorize.rs`
+- Top-level orchestrator `authorize_disbursement(intent, anchor,
+  registry, now_unix_ms) -> AuthorizationResult` and the closed
+  `AuthorizationResult` type → `crates/oracleguard-policy/src/authorize.rs`
+- Golden authorized-effect fixture (postcard-encoded
+  `AuthorizedEffectV1`) →
+  `fixtures/authorize/authorized_effect_golden.postcard`
+- Gate documentation (authoritative order, within-gate precedence,
+  reason-to-gate partition, v1 destination-mapping compatibility) →
+  `docs/authorization-gates.md`
 
-Cluster 5 — Three-Gate Authorization Closure — lands its work at:
+Cluster 6 — Authority Routing and Submission Boundary — lands its
+work at:
 
-- Anchor-gate policy-registration check (emits `PolicyNotFound` and
-  handles the non-v1 `intent_version` branch that Cluster 4 leaves as
-  a caller-side contract) — caller of `evaluate_disbursement`, not a
-  replacement for it.
-- Registry-gate allocation/subject/asset validation (emits
-  `AllocationNotFound`, `SubjectNotAuthorized`, `AssetMismatch`) —
-  produces the `allocation_basis_lovelace` argument that
-  `evaluate_disbursement` consumes.
-- Freshness check (emits `OracleStale`) continues to live in
-  `oracleguard-adapter::charli3::check_freshness`; Cluster 5 wires it
-  into the gate sequence rather than moving it into the evaluator.
+- Routing / dispatch — consume `AuthorizationResult::Authorized { effect }`
+  and route on the already-validated `effect.asset` and destination.
+  Do NOT re-run any gate; do NOT re-derive routing from `intent`
+  fields the registry gate has already cleared.
+- Submission envelope — the adapter's Ziranity CLI shell builds the
+  envelope around `AuthorizedEffectV1` canonical bytes. The domain
+  separator `ORACLEGUARD_DISBURSEMENT_V1` and the well-known
+  disbursement OCU constant remain the Ziranity-side contract.
+- Evidence bundle — persist the `(intent_bytes, AuthorizationResult)`
+  pair; on denial the bundle carries `(reason, gate)` and no effect.
 
 See `docs/cluster-1-closeout.md`, `docs/cluster-2-closeout.md`,
-`docs/cluster-3-closeout.md`, and `docs/cluster-4-closeout.md` for the
-prior handoff records.
+`docs/cluster-3-closeout.md`, `docs/cluster-4-closeout.md`, and
+`docs/cluster-5-closeout.md` for the prior handoff records.
 
 ## Private integration posture
 
