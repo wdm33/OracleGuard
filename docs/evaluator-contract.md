@@ -100,9 +100,15 @@ registry gates are Cluster 5.
    selected band (Slice 03). If the arithmetic pipeline cannot
    produce a `u64`, short-circuit to `Deny { ReleaseCapExceeded }`
    (Slice 04).
-5. Compare `intent.requested_amount_lovelace` to `max_releasable`:
-   - `requested <= max_releasable` → `Allow { requested, band_bps }`.
-   - `requested > max_releasable` → `Deny { ReleaseCapExceeded }`.
+5. Compare `intent.requested_amount_lovelace` to `max_releasable`
+   through `oracleguard_policy::math::decide_grant`:
+   - `decide_grant` returns `None` → `Allow { requested, band_bps }`.
+   - `decide_grant` returns `Some(ReleaseCapExceeded)` →
+     `Deny { ReleaseCapExceeded }`.
+
+`decide_grant` emits *only* `ReleaseCapExceeded` on deny — no other
+canonical reason code may come out of this helper. This keeps the
+grant-gate's failure surface narrow and pinned.
 
 Equality at the cap is an allow. This is the sole sanctioned rounding
 rule and it is documented here so Cluster 5's grant-gate wiring cannot

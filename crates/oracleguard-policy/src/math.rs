@@ -9,6 +9,8 @@
 //! [`crate::evaluate`]), canonical types (those live in
 //! `oracleguard-schemas`), or any I/O.
 
+use oracleguard_schemas::reason::DisbursementReasonCode;
+
 /// Upper threshold for the release-band mapping, in micro-USD.
 ///
 /// At or above this price the evaluator selects [`BAND_HIGH_BPS`].
@@ -126,6 +128,35 @@ pub const fn compute_max_releasable_lovelace(
         None
     } else {
         Some(cap_u128 as u64)
+    }
+}
+
+/// Compare a requested amount to a precomputed release cap and return
+/// the grant-gate outcome.
+///
+/// - `None` means the request is within the cap and must be allowed.
+/// - `Some(DisbursementReasonCode::ReleaseCapExceeded)` means the
+///   request exceeds the cap and must be denied with exactly that
+///   canonical reason.
+///
+/// Equality at the cap (`requested == max_releasable_lovelace`) is
+/// treated as within-cap. This is the sole sanctioned rounding rule
+/// for the boundary and it is pinned in `docs/evaluator-contract.md §5`.
+///
+/// The function is total and pure: no panics, no I/O, no allocation.
+/// It does not re-check `requested == 0` — that is an `AmountZero`
+/// concern, handled upstream in `evaluate_disbursement` before this
+/// function is called. Keeping the two checks separate means each
+/// step emits exactly one typed reason.
+#[must_use]
+pub const fn decide_grant(
+    max_releasable_lovelace: u64,
+    requested_amount_lovelace: u64,
+) -> Option<DisbursementReasonCode> {
+    if requested_amount_lovelace > max_releasable_lovelace {
+        Some(DisbursementReasonCode::ReleaseCapExceeded)
+    } else {
+        None
     }
 }
 
@@ -324,6 +355,159 @@ mod tests {
             let a = compute_max_releasable_lovelace(alloc, bps);
             let b = compute_max_releasable_lovelace(alloc, bps);
             assert_eq!(a, b, "cap varied for ({alloc}, {bps})");
+        }
+    }
+
+    // ---- compute_max_releasable_lovelace: overflow closure ----
+
+    #[test]
+    fn oversized_bps_triggers_none_downcast() {
+        // Non-band inputs can exceed BASIS_POINT_SCALE. Under those
+        // conditions the post-division value may exceed u64::MAX; the
+        // function must return None rather than wrap or panic.
+        //
+        // u64::MAX * (BASIS_POINT_SCALE + 1) / BASIS_POINT_SCALE > u64::MAX
+        // by construction.
+        assert_eq!(
+            compute_max_releasable_lovelace(u64::MAX, BASIS_POINT_SCALE + 1),
+            None,
+        );
+    }
+
+    #[test]
+    fn maximum_oversized_bps_is_still_total() {
+        // u64::MAX * u64::MAX fits in u128 (the largest value is
+        // 2^128 - 2^65 + 1, which is < 2^128). The function must not
+        // panic and must return None.
+        assert_eq!(
+            compute_max_releasable_lovelace(u64::MAX, u64::MAX),
+            None,
+        );
+    }
+
+    #[test]
+    fn oversized_bps_with_tiny_allocation_still_fits() {
+        // With a tiny allocation the product fits in u64 even when
+        // release_cap_bps is oversized. The function must return Some.
+        //
+        // 1 * (BASIS_POINT_SCALE + 1) / BASIS_POINT_SCALE = 1 (floor).
+        assert_eq!(
+            compute_max_releasable_lovelace(1, BASIS_POINT_SCALE + 1),
+            Some(1),
+        );
+    }
+
+    #[test]
+    fn overflow_closure_is_deterministic() {
+        let a = compute_max_releasable_lovelace(u64::MAX, u64::MAX);
+        let b = compute_max_releasable_lovelace(u64::MAX, u64::MAX);
+        assert_eq!(a, b);
+    }
+
+    // ---- decide_grant ----
+
+    #[test]
+    fn decide_grant_allows_when_request_below_cap() {
+        assert_eq!(decide_grant(750_000_000, 700_000_000), None);
+    }
+
+    #[test]
+    fn decide_grant_allows_when_request_equals_cap() {
+        // Boundary: equality at the cap is an allow. Pinned by the
+        // contract doc §5.
+        assert_eq!(decide_grant(750_000_000, 750_000_000), None);
+    }
+
+    #[test]
+    fn decide_grant_denies_when_request_above_cap() {
+        assert_eq!(
+            decide_grant(750_000_000, 900_000_000),
+            Some(DisbursementReasonCode::ReleaseCapExceeded),
+        );
+    }
+
+    #[test]
+    fn decide_grant_allows_zero_request_against_zero_cap() {
+        // decide_grant does not re-check AmountZero; the evaluator
+        // handles that upstream. A zero request against a zero cap is
+        // "within cap" by comparison, so decide_grant returns None.
+        assert_eq!(decide_grant(0, 0), None);
+    }
+
+    #[test]
+    fn decide_grant_denies_nonzero_request_against_zero_cap() {
+        assert_eq!(
+            decide_grant(0, 1),
+            Some(DisbursementReasonCode::ReleaseCapExceeded),
+        );
+    }
+
+    #[test]
+    fn decide_grant_is_total_at_u64_max() {
+        assert_eq!(decide_grant(u64::MAX, u64::MAX), None);
+        assert_eq!(decide_grant(0, u64::MAX), Some(DisbursementReasonCode::ReleaseCapExceeded));
+        assert_eq!(decide_grant(u64::MAX, 0), None);
+    }
+
+    #[test]
+    fn decide_grant_is_deterministic() {
+        for (cap, req) in [
+            (0u64, 0u64),
+            (750_000_000, 700_000_000),
+            (750_000_000, 750_000_000),
+            (750_000_000, 900_000_000),
+            (u64::MAX, u64::MAX),
+        ] {
+            let a = decide_grant(cap, req);
+            let b = decide_grant(cap, req);
+            assert_eq!(a, b, "decide_grant varied for ({cap}, {req})");
+        }
+    }
+
+    #[test]
+    fn decide_grant_emits_only_release_cap_exceeded() {
+        // Exhaustive: for every deny branch the function must emit
+        // exactly DisbursementReasonCode::ReleaseCapExceeded — never
+        // any other typed reason.
+        for (cap, req) in [
+            (0u64, 1u64),
+            (1, 2),
+            (750_000_000, 900_000_000),
+            (0, u64::MAX),
+        ] {
+            assert_eq!(
+                decide_grant(cap, req),
+                Some(DisbursementReasonCode::ReleaseCapExceeded),
+            );
+        }
+    }
+
+    // ---- Composite: cap pipeline never panics on valid band inputs ----
+
+    #[test]
+    fn full_cap_pipeline_is_total_for_valid_bands() {
+        // For every price-derived band and every allocation in u64,
+        // compute_max_releasable_lovelace must return Some and
+        // decide_grant must emit either None or ReleaseCapExceeded —
+        // never panic and never emit any other reason.
+        let prices = [0u64, 1, 258_000, 349_999, 350_000, 450_000, 500_000, u64::MAX];
+        let allocations = [0u64, 1, 1_000_000_000, u64::MAX];
+        let requests = [0u64, 1, 700_000_000, 900_000_000, u64::MAX];
+        for price in prices {
+            for alloc in allocations {
+                let bps = select_release_band_bps(price);
+                let cap = match compute_max_releasable_lovelace(alloc, bps) {
+                    Some(c) => c,
+                    None => panic!("band {bps} produced None for allocation {alloc}"),
+                };
+                for req in requests {
+                    let outcome = decide_grant(cap, req);
+                    match outcome {
+                        None | Some(DisbursementReasonCode::ReleaseCapExceeded) => {}
+                        Some(other) => panic!("unexpected reason {other:?}"),
+                    }
+                }
+            }
         }
     }
 
