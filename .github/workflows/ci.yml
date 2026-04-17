@@ -21,7 +21,13 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}
       - name: cargo metadata
         run: cargo metadata --format-version=1 --no-deps > /dev/null
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: dependency-direction check
         run: ./scripts/check_deps.sh
       - name: cargo build --workspace
         run: cargo build --workspace --locked --verbose
+      - name: cargo test --workspace
+        run: ./scripts/deterministic_test.sh
