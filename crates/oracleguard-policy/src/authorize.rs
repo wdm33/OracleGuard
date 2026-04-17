@@ -135,6 +135,69 @@ pub trait AllocationRegistryView {
 }
 
 // -------------------------------------------------------------------
+// Registry gate (Cluster 5 Slice 04)
+// -------------------------------------------------------------------
+
+/// Run the registry gate against a caller-supplied
+/// [`AllocationRegistryView`] and return the approved allocation basis.
+///
+/// The registry gate is the second gate in the three-gate closure. It
+/// validates that the allocation exists, the requester is authorized
+/// against it, the intent's asset matches the allocation's approved
+/// asset, and the intent's destination is in the allocation's
+/// approved-destination set.
+///
+/// ## Check order (pinned by `docs/authorization-gates.md`)
+///
+/// 1. `registry.lookup(&intent.allocation_id) == None` →
+///    [`DisbursementReasonCode::AllocationNotFound`].
+/// 2. `intent.requester_id` not in `authorized_subjects` →
+///    [`DisbursementReasonCode::SubjectNotAuthorized`].
+/// 3. `intent.asset != approved_asset` (byte-identical) →
+///    [`DisbursementReasonCode::AssetMismatch`].
+/// 4. `intent.destination` not in `approved_destinations`
+///    (byte-identical, including `length`) →
+///    [`DisbursementReasonCode::SubjectNotAuthorized`] per the v1
+///    destination-mapping compatibility (see the variant docstring
+///    and `docs/authorization-gates.md §Registry gate`).
+/// 5. `Ok(basis_lovelace)` — registry gate passes. The grant gate may
+///    run and will receive `basis_lovelace` as the evaluator's
+///    allocation-basis argument.
+///
+/// ## Purity
+///
+/// This function is pure. It performs no I/O, reads no wall clock,
+/// and does not allocate. The trait argument is the single mediator
+/// through which allocation state reaches the gate.
+pub fn run_registry_gate(
+    intent: &DisbursementIntentV1,
+    registry: &impl AllocationRegistryView,
+) -> Result<u64, DisbursementReasonCode> {
+    let facts = match registry.lookup(&intent.allocation_id) {
+        Some(f) => f,
+        None => return Err(DisbursementReasonCode::AllocationNotFound),
+    };
+
+    if !facts.authorized_subjects.contains(&intent.requester_id) {
+        return Err(DisbursementReasonCode::SubjectNotAuthorized);
+    }
+
+    if intent.asset != facts.approved_asset {
+        return Err(DisbursementReasonCode::AssetMismatch);
+    }
+
+    if !facts.approved_destinations.contains(&intent.destination) {
+        // v1 destination-mapping compatibility: destination mismatch
+        // emits SubjectNotAuthorized. See the variant docstring and
+        // `docs/authorization-gates.md §Registry gate` for the
+        // rationale.
+        return Err(DisbursementReasonCode::SubjectNotAuthorized);
+    }
+
+    Ok(facts.basis_lovelace)
+}
+
+// -------------------------------------------------------------------
 // Anchor gate (Cluster 5 Slice 03)
 // -------------------------------------------------------------------
 
@@ -240,6 +303,59 @@ mod tests {
     impl<'a> PolicyAnchorView for StaticAnchor<'a> {
         fn is_policy_registered(&self, policy_ref: &[u8; 32]) -> bool {
             self.registered.iter().any(|r| r == policy_ref)
+        }
+    }
+
+    // Static in-memory implementation of `AllocationRegistryView`. The
+    // allocation id, basis, subject set, asset, and destination set
+    // are all borrowed from the test so the trait stays zero-alloc.
+    struct StaticRegistry<'a> {
+        allocation_id: [u8; 32],
+        basis_lovelace: u64,
+        authorized_subjects: &'a [[u8; 32]],
+        approved_asset: AssetIdV1,
+        approved_destinations: &'a [CardanoAddressV1],
+    }
+
+    impl<'a> AllocationRegistryView for StaticRegistry<'a> {
+        fn lookup(&self, allocation_id: &[u8; 32]) -> Option<AllocationFacts<'_>> {
+            if *allocation_id == self.allocation_id {
+                Some(AllocationFacts {
+                    basis_lovelace: self.basis_lovelace,
+                    authorized_subjects: self.authorized_subjects,
+                    approved_asset: self.approved_asset,
+                    approved_destinations: self.approved_destinations,
+                })
+            } else {
+                None
+            }
+        }
+    }
+
+    fn sample_destination() -> CardanoAddressV1 {
+        CardanoAddressV1 {
+            bytes: [0x55; 57],
+            length: 57,
+        }
+    }
+
+    fn other_destination() -> CardanoAddressV1 {
+        CardanoAddressV1 {
+            bytes: [0x66; 57],
+            length: 57,
+        }
+    }
+
+    fn ok_registry<'a>(
+        subjects: &'a [[u8; 32]],
+        destinations: &'a [CardanoAddressV1],
+    ) -> StaticRegistry<'a> {
+        StaticRegistry {
+            allocation_id: ALLOCATION_ID,
+            basis_lovelace: 1_000_000_000,
+            authorized_subjects: subjects,
+            approved_asset: AssetIdV1::ADA,
+            approved_destinations: destinations,
         }
     }
 
@@ -514,6 +630,201 @@ mod tests {
         let anchor = StaticAnchor { registered: &[] };
         let reason = run_anchor_gate(&sample_intent(), &anchor).unwrap_err();
         assert_eq!(reason.gate(), AuthorizationGate::Anchor);
+    }
+
+    // ---- Registry gate (Cluster 5 Slice 04) ----
+
+    #[test]
+    fn registry_gate_passes_when_all_checks_match() {
+        let subjects = [REQUESTER_ID];
+        let destinations = [sample_destination()];
+        let registry = ok_registry(&subjects, &destinations);
+        assert_eq!(
+            run_registry_gate(&sample_intent(), &registry),
+            Ok(1_000_000_000),
+        );
+    }
+
+    #[test]
+    fn registry_gate_returns_basis_verbatim() {
+        // The registry gate passes basis_lovelace through unchanged
+        // for the grant gate to consume.
+        let subjects = [REQUESTER_ID];
+        let destinations = [sample_destination()];
+        let mut registry = ok_registry(&subjects, &destinations);
+        registry.basis_lovelace = 7_777_777;
+        assert_eq!(
+            run_registry_gate(&sample_intent(), &registry),
+            Ok(7_777_777),
+        );
+    }
+
+    #[test]
+    fn registry_gate_missing_allocation_emits_allocation_not_found() {
+        let subjects = [REQUESTER_ID];
+        let destinations = [sample_destination()];
+        let mut registry = ok_registry(&subjects, &destinations);
+        registry.allocation_id = [0xDE; 32];
+        assert_eq!(
+            run_registry_gate(&sample_intent(), &registry),
+            Err(DisbursementReasonCode::AllocationNotFound),
+        );
+    }
+
+    #[test]
+    fn registry_gate_unauthorized_subject_emits_subject_not_authorized() {
+        let subjects = [[0x99; 32]];
+        let destinations = [sample_destination()];
+        let registry = ok_registry(&subjects, &destinations);
+        assert_eq!(
+            run_registry_gate(&sample_intent(), &registry),
+            Err(DisbursementReasonCode::SubjectNotAuthorized),
+        );
+    }
+
+    #[test]
+    fn registry_gate_asset_mismatch_emits_asset_mismatch() {
+        let subjects = [REQUESTER_ID];
+        let destinations = [sample_destination()];
+        let mut registry = ok_registry(&subjects, &destinations);
+        registry.approved_asset = AssetIdV1 {
+            policy_id: [0xAB; 28],
+            asset_name: *b"OTHER\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0",
+            asset_name_len: 5,
+        };
+        assert_eq!(
+            run_registry_gate(&sample_intent(), &registry),
+            Err(DisbursementReasonCode::AssetMismatch),
+        );
+    }
+
+    #[test]
+    fn registry_gate_destination_mismatch_emits_subject_not_authorized_v1_mapping() {
+        // v1 compatibility pin: destination mismatch maps to
+        // SubjectNotAuthorized. A dedicated destination reason code is
+        // deferred to a future canonical-byte version-boundary change.
+        // See the DisbursementReasonCode::SubjectNotAuthorized
+        // docstring.
+        let subjects = [REQUESTER_ID];
+        let destinations = [other_destination()];
+        let registry = ok_registry(&subjects, &destinations);
+        assert_eq!(
+            run_registry_gate(&sample_intent(), &registry),
+            Err(DisbursementReasonCode::SubjectNotAuthorized),
+        );
+    }
+
+    #[test]
+    fn registry_gate_empty_destination_set_denies_destination() {
+        let subjects = [REQUESTER_ID];
+        let destinations: [CardanoAddressV1; 0] = [];
+        let registry = ok_registry(&subjects, &destinations);
+        assert_eq!(
+            run_registry_gate(&sample_intent(), &registry),
+            Err(DisbursementReasonCode::SubjectNotAuthorized),
+        );
+    }
+
+    #[test]
+    fn registry_gate_empty_subject_set_denies_subject() {
+        let subjects: [[u8; 32]; 0] = [];
+        let destinations = [sample_destination()];
+        let registry = ok_registry(&subjects, &destinations);
+        assert_eq!(
+            run_registry_gate(&sample_intent(), &registry),
+            Err(DisbursementReasonCode::SubjectNotAuthorized),
+        );
+    }
+
+    #[test]
+    fn registry_gate_allocation_precedes_subject() {
+        // Both allocation and subject are invalid. Allocation lookup
+        // runs first, so AllocationNotFound wins.
+        let subjects = [[0x99; 32]];
+        let destinations = [other_destination()];
+        let mut registry = ok_registry(&subjects, &destinations);
+        registry.allocation_id = [0xDE; 32];
+        assert_eq!(
+            run_registry_gate(&sample_intent(), &registry),
+            Err(DisbursementReasonCode::AllocationNotFound),
+        );
+    }
+
+    #[test]
+    fn registry_gate_subject_precedes_asset() {
+        // Subject invalid AND asset invalid → SubjectNotAuthorized.
+        let subjects = [[0x99; 32]];
+        let destinations = [sample_destination()];
+        let mut registry = ok_registry(&subjects, &destinations);
+        registry.approved_asset = AssetIdV1 {
+            policy_id: [0xAB; 28],
+            asset_name: [0u8; 32],
+            asset_name_len: 0,
+        };
+        assert_eq!(
+            run_registry_gate(&sample_intent(), &registry),
+            Err(DisbursementReasonCode::SubjectNotAuthorized),
+        );
+    }
+
+    #[test]
+    fn registry_gate_asset_precedes_destination() {
+        // Asset invalid AND destination invalid → AssetMismatch.
+        let subjects = [REQUESTER_ID];
+        let destinations = [other_destination()];
+        let mut registry = ok_registry(&subjects, &destinations);
+        registry.approved_asset = AssetIdV1 {
+            policy_id: [0xAB; 28],
+            asset_name: [0u8; 32],
+            asset_name_len: 0,
+        };
+        assert_eq!(
+            run_registry_gate(&sample_intent(), &registry),
+            Err(DisbursementReasonCode::AssetMismatch),
+        );
+    }
+
+    #[test]
+    fn registry_gate_destination_address_length_matters() {
+        // Two destinations with the same bytes but different lengths
+        // must NOT compare equal. The approved destination set uses
+        // exact byte-identical comparison.
+        let subjects = [REQUESTER_ID];
+        let mut approved = sample_destination();
+        approved.length = 56;
+        let destinations = [approved];
+        let registry = ok_registry(&subjects, &destinations);
+        assert_eq!(
+            run_registry_gate(&sample_intent(), &registry),
+            Err(DisbursementReasonCode::SubjectNotAuthorized),
+        );
+    }
+
+    #[test]
+    fn registry_gate_is_deterministic() {
+        let subjects = [REQUESTER_ID];
+        let destinations = [sample_destination()];
+        let registry = ok_registry(&subjects, &destinations);
+        let intent = sample_intent();
+        for _ in 0..4 {
+            assert_eq!(run_registry_gate(&intent, &registry), Ok(1_000_000_000));
+        }
+    }
+
+    #[test]
+    fn registry_gate_failure_emits_reason_mapped_to_registry_gate() {
+        // Every denial from run_registry_gate must be a reason whose
+        // intrinsic .gate() is AuthorizationGate::Registry.
+        let subjects: [[u8; 32]; 0] = [];
+        let destinations: [CardanoAddressV1; 0] = [];
+        let registry = ok_registry(&subjects, &destinations);
+        let reason = run_registry_gate(&sample_intent(), &registry).unwrap_err();
+        assert_eq!(reason.gate(), AuthorizationGate::Registry);
+
+        let mut reg2 = registry;
+        reg2.allocation_id = [0xDE; 32];
+        let reason2 = run_registry_gate(&sample_intent(), &reg2).unwrap_err();
+        assert_eq!(reason2.gate(), AuthorizationGate::Registry);
     }
 
     #[test]
