@@ -10,6 +10,10 @@ description = "OracleGuard shell adapter: Charli3 fetch, Ziranity submit, Cardan
 [dependencies]
 oracleguard-schemas = { path = "../oracleguard-schemas" }
 oracleguard-policy = { path = "../oracleguard-policy" }
+minicbor = { version = "0.25", default-features = false, features = ["alloc"] }
+
+[dev-dependencies]
+postcard = { version = "=1.0.10", default-features = false, features = ["alloc"] }
 
 [lints]
 workspace = true

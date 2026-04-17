@@ -31,6 +31,9 @@ secrets/
 *.signed
 *.cbor
 
+# Public test fixtures are tracked even if they match the patterns above
+!fixtures/**/*.cbor
+
 # Claude Code project files
 CLAUDE.md
 .claude/
