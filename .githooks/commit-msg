@@ -1,9 +1,9 @@
 #!/bin/bash
-# Reject AI-attribution in commit messages.
-# OracleGuard commits must read as human-authored; no trailers, footers,
-# or metadata referencing AI tools.
+# Reject common vendor-attribution trailers in commit messages.
+# Commits in this repo read as human-authored; no third-party
+# co-author trailers, footers, or metadata.
 if grep -iE '(co-authored-by:.*(claude|copilot|gpt|anthropic|ai)|generated (by|with).*(claude|copilot|gpt)|claude code|claude\.ai|noreply@anthropic\.com)' "$1"; then
-  echo "ERROR: Commit message contains AI attribution. Remove it and retry."
+  echo "ERROR: commit message contains a disallowed attribution trailer. Remove it and retry."
   exit 1
 fi
 exit 0

@@ -76,15 +76,16 @@ cargo build --workspace
 
 ## Git Hooks
 
-Enable the repository's managed hooks once after cloning:
+After cloning, enable the repository's managed hooks:
 
 ```
 git config core.hooksPath .githooks
 ```
 
-The `commit-msg` hook rejects AI attribution. The `pre-commit` hook blocks
-staged secrets (mnemonics, signing keys, bearer tokens, `.skey`/`.key`
-files).
+The `pre-commit` hook scans staged content for secrets that must never
+reach a public repo: mnemonics, Cardano signing keys, raw Ed25519 key
+bytes, and bearer tokens. The `commit-msg` hook enforces commit-message
+hygiene.
 
 ## License
 
