@@ -28,7 +28,11 @@
 use oracleguard_schemas::effect::{AssetIdV1, AuthorizedEffectV1, CardanoAddressV1};
 use oracleguard_schemas::gate::AuthorizationGate;
 use oracleguard_schemas::intent::{validate_intent_version, DisbursementIntentV1};
+use oracleguard_schemas::oracle::check_freshness;
 use oracleguard_schemas::reason::DisbursementReasonCode;
+
+use crate::evaluate::evaluate_disbursement;
+use crate::error::EvaluationResult;
 
 /// Closed authorization result produced by the three-gate closure.
 ///
@@ -195,6 +199,137 @@ pub fn run_registry_gate(
     }
 
     Ok(facts.basis_lovelace)
+}
+
+// -------------------------------------------------------------------
+// Grant gate (Cluster 5 Slice 05)
+// -------------------------------------------------------------------
+
+/// Run the grant gate for an already-anchored, already-registry-valid
+/// intent and return the canonical authorized effect on success.
+///
+/// The grant gate is the third gate in the three-gate closure. It
+/// validates oracle freshness and then delegates the release-cap
+/// decision to the pure evaluator
+/// [`crate::evaluate::evaluate_disbursement`]. It does NOT re-derive
+/// any band math, threshold table, or cap arithmetic — all of that is
+/// the evaluator's responsibility.
+///
+/// ## Check order (pinned by `docs/authorization-gates.md`)
+///
+/// 1. [`check_freshness`] against `intent.oracle_provenance` with the
+///    caller-supplied `now_unix_ms` → on error,
+///    [`DisbursementReasonCode::OracleStale`].
+/// 2. [`evaluate_disbursement`] with `basis_lovelace`:
+///    - `Allow { authorized_amount_lovelace, release_cap_basis_points }`
+///      → `Ok(AuthorizedEffectV1 { ... })` with fields copied
+///      verbatim from the intent.
+///    - `Deny { reason }` → `Err(reason)` (one of `AmountZero`,
+///      `OraclePriceZero`, `ReleaseCapExceeded`).
+///
+/// ## Purity
+///
+/// This function is pure with respect to its arguments. `now_unix_ms`
+/// is taken explicitly so the wall clock does not leak into the
+/// gate; the caller reads the clock and passes it in.
+///
+/// ## Delegation to the evaluator
+///
+/// The `AmountZero → OraclePriceZero → ReleaseCapExceeded` suffix is
+/// the evaluator's internal order; the grant gate inherits it by
+/// construction. Freshness runs first so a stale datum cannot feed
+/// the evaluator.
+pub fn run_grant_gate(
+    intent: &DisbursementIntentV1,
+    basis_lovelace: u64,
+    now_unix_ms: u64,
+) -> Result<AuthorizedEffectV1, DisbursementReasonCode> {
+    if check_freshness(&intent.oracle_provenance, now_unix_ms).is_err() {
+        return Err(DisbursementReasonCode::OracleStale);
+    }
+    match evaluate_disbursement(intent, basis_lovelace) {
+        EvaluationResult::Allow {
+            authorized_amount_lovelace,
+            release_cap_basis_points,
+        } => Ok(AuthorizedEffectV1 {
+            policy_ref: intent.policy_ref,
+            allocation_id: intent.allocation_id,
+            requester_id: intent.requester_id,
+            destination: intent.destination,
+            asset: intent.asset,
+            authorized_amount_lovelace,
+            release_cap_basis_points,
+        }),
+        EvaluationResult::Deny { reason } => Err(reason),
+    }
+}
+
+// -------------------------------------------------------------------
+// Top-level three-gate composition (Cluster 5 Slice 05)
+// -------------------------------------------------------------------
+
+/// Run the full three-gate authorization closure and return a typed
+/// [`AuthorizationResult`].
+///
+/// This is the single public entry point for OracleGuard's
+/// authorization surface. Gates run in the fixed order
+/// anchor → registry → grant; the first failing gate produces the
+/// canonical denial reason and later gates are not consulted.
+///
+/// ## Contract
+///
+/// - `intent` — the canonical disbursement intent under authorization.
+///   The anchor gate validates its `intent_version`.
+/// - `anchor` — a pure view onto registered policy identities. The
+///   anchor gate calls `anchor.is_policy_registered(&intent.policy_ref)`.
+/// - `registry` — a pure view onto allocations. The registry gate
+///   calls `registry.lookup(&intent.allocation_id)` and validates
+///   subject, asset, and destination against the returned facts.
+/// - `now_unix_ms` — wall-clock value for the freshness check. The
+///   caller reads the clock; this function is pure with respect to
+///   its arguments.
+///
+/// ## Return values
+///
+/// - `AuthorizationResult::Authorized { effect }` — every gate passed.
+///   The `effect` carries the canonical bytes settlement will execute.
+/// - `AuthorizationResult::Denied { reason, gate }` — a gate denied.
+///   `gate` always equals `reason.gate()`.
+///
+/// ## Purity and determinism
+///
+/// Identical inputs produce byte-identical outputs across runs. No
+/// I/O, no internal wall-clock reads, no mutable state.
+pub fn authorize_disbursement(
+    intent: &DisbursementIntentV1,
+    anchor: &impl PolicyAnchorView,
+    registry: &impl AllocationRegistryView,
+    now_unix_ms: u64,
+) -> AuthorizationResult {
+    if let Err(reason) = run_anchor_gate(intent, anchor) {
+        return AuthorizationResult::Denied {
+            reason,
+            gate: AuthorizationGate::Anchor,
+        };
+    }
+
+    let basis_lovelace = match run_registry_gate(intent, registry) {
+        Ok(b) => b,
+        Err(reason) => {
+            return AuthorizationResult::Denied {
+                reason,
+                gate: AuthorizationGate::Registry,
+            };
+        }
+    };
+
+    match run_grant_gate(intent, basis_lovelace, now_unix_ms) {
+        Ok(effect) => AuthorizationResult::Authorized { effect },
+        Err(reason) => AuthorizationResult::Denied {
+            reason,
+            gate: AuthorizationGate::Grant,
+        },
+    }
 }
 
 // -------------------------------------------------------------------
@@ -825,6 +960,346 @@ mod tests {
         reg2.allocation_id = [0xDE; 32];
         let reason2 = run_registry_gate(&sample_intent(), &reg2).unwrap_err();
         assert_eq!(reason2.gate(), AuthorizationGate::Registry);
+    }
+
+    // ---- Grant gate (Cluster 5 Slice 05) ----
+
+    // Demo clock values (Implementation Plan §16 anchors).
+    // Intent expiry_unix = 1_713_000_300_000. Fresh clock must be
+    // strictly less than that.
+    const FRESH_NOW_MS: u64 = 1_713_000_000_000;
+    const STALE_NOW_MS: u64 = 1_713_000_300_000; // equal to expiry → stale
+    const DEMO_BASIS_LOVELACE: u64 = 1_000_000_000;
+
+    #[test]
+    fn grant_gate_allows_within_cap_with_fresh_oracle() {
+        let effect = run_grant_gate(&sample_intent(), DEMO_BASIS_LOVELACE, FRESH_NOW_MS)
+            .expect("demo intent is within mid-band cap");
+        assert_eq!(effect.policy_ref, sample_intent().policy_ref);
+        assert_eq!(effect.allocation_id, sample_intent().allocation_id);
+        assert_eq!(effect.requester_id, sample_intent().requester_id);
+        assert_eq!(effect.destination, sample_intent().destination);
+        assert_eq!(effect.asset, sample_intent().asset);
+        assert_eq!(
+            effect.authorized_amount_lovelace,
+            sample_intent().requested_amount_lovelace,
+        );
+        assert_eq!(effect.release_cap_basis_points, 7_500);
+    }
+
+    #[test]
+    fn grant_gate_rejects_stale_oracle_with_oracle_stale() {
+        assert_eq!(
+            run_grant_gate(&sample_intent(), DEMO_BASIS_LOVELACE, STALE_NOW_MS),
+            Err(DisbursementReasonCode::OracleStale),
+        );
+    }
+
+    #[test]
+    fn grant_gate_freshness_precedes_evaluator() {
+        // Intent has requested_amount_lovelace == 0, which alone would
+        // trigger AmountZero in the evaluator. But the oracle is stale,
+        // so freshness must fire first and win.
+        let mut intent = sample_intent();
+        intent.requested_amount_lovelace = 0;
+        assert_eq!(
+            run_grant_gate(&intent, DEMO_BASIS_LOVELACE, STALE_NOW_MS),
+            Err(DisbursementReasonCode::OracleStale),
+        );
+    }
+
+    #[test]
+    fn grant_gate_propagates_amount_zero_from_evaluator() {
+        let mut intent = sample_intent();
+        intent.requested_amount_lovelace = 0;
+        assert_eq!(
+            run_grant_gate(&intent, DEMO_BASIS_LOVELACE, FRESH_NOW_MS),
+            Err(DisbursementReasonCode::AmountZero),
+        );
+    }
+
+    #[test]
+    fn grant_gate_propagates_oracle_price_zero_from_evaluator() {
+        let mut intent = sample_intent();
+        intent.oracle_fact.price_microusd = 0;
+        assert_eq!(
+            run_grant_gate(&intent, DEMO_BASIS_LOVELACE, FRESH_NOW_MS),
+            Err(DisbursementReasonCode::OraclePriceZero),
+        );
+    }
+
+    #[test]
+    fn grant_gate_propagates_release_cap_exceeded_from_evaluator() {
+        // 900 ADA request against mid-band cap of 750 ADA denies.
+        let mut intent = sample_intent();
+        intent.requested_amount_lovelace = 900_000_000;
+        assert_eq!(
+            run_grant_gate(&intent, DEMO_BASIS_LOVELACE, FRESH_NOW_MS),
+            Err(DisbursementReasonCode::ReleaseCapExceeded),
+        );
+    }
+
+    #[test]
+    fn grant_gate_authorized_amount_equals_requested_amount() {
+        // The evaluator must not silently reduce the request; the
+        // authorized effect's amount equals the intent's requested
+        // amount for every allow outcome.
+        let mut intent = sample_intent();
+        intent.requested_amount_lovelace = 500_000_000;
+        let effect =
+            run_grant_gate(&intent, DEMO_BASIS_LOVELACE, FRESH_NOW_MS).expect("within cap");
+        assert_eq!(effect.authorized_amount_lovelace, 500_000_000);
+    }
+
+    #[test]
+    fn grant_gate_does_not_duplicate_cap_math() {
+        // Structural: the grant gate depends only on evaluator outputs,
+        // so the authorized band (release_cap_basis_points) must match
+        // what the evaluator produced for the same intent. Two prices
+        // and two bands, one test: high band vs. low band.
+        let mut high = sample_intent();
+        high.oracle_fact.price_microusd = 500_000;
+        let eff_high = run_grant_gate(&high, DEMO_BASIS_LOVELACE, FRESH_NOW_MS)
+            .expect("high band 100% allows 700m");
+        assert_eq!(eff_high.release_cap_basis_points, 10_000);
+
+        let mut low = sample_intent();
+        low.oracle_fact.price_microusd = 100_000;
+        low.requested_amount_lovelace = 400_000_000;
+        let eff_low =
+            run_grant_gate(&low, DEMO_BASIS_LOVELACE, FRESH_NOW_MS).expect("low band allows 400m");
+        assert_eq!(eff_low.release_cap_basis_points, 5_000);
+    }
+
+    #[test]
+    fn grant_gate_is_deterministic() {
+        let intent = sample_intent();
+        for _ in 0..4 {
+            let a = run_grant_gate(&intent, DEMO_BASIS_LOVELACE, FRESH_NOW_MS);
+            let b = run_grant_gate(&intent, DEMO_BASIS_LOVELACE, FRESH_NOW_MS);
+            assert_eq!(a, b);
+        }
+    }
+
+    #[test]
+    fn grant_gate_failure_emits_reason_mapped_to_grant_gate() {
+        // Every denial from run_grant_gate must be a reason whose
+        // intrinsic .gate() is AuthorizationGate::Grant.
+        for (intent, now) in [
+            (sample_intent(), STALE_NOW_MS),
+            ({ let mut i = sample_intent(); i.requested_amount_lovelace = 0; i }, FRESH_NOW_MS),
+            ({ let mut i = sample_intent(); i.oracle_fact.price_microusd = 0; i }, FRESH_NOW_MS),
+            ({ let mut i = sample_intent(); i.requested_amount_lovelace = 900_000_000; i }, FRESH_NOW_MS),
+        ] {
+            let reason = run_grant_gate(&intent, DEMO_BASIS_LOVELACE, now).unwrap_err();
+            assert_eq!(reason.gate(), AuthorizationGate::Grant);
+        }
+    }
+
+    // ---- Top-level composition (Cluster 5 Slice 05) ----
+
+    fn ok_anchor() -> StaticAnchor<'static> {
+        static REGISTERED: [[u8; 32]; 1] = [[0x11; 32]];
+        StaticAnchor {
+            registered: &REGISTERED,
+        }
+    }
+
+    fn full_ok_registry() -> StaticRegistry<'static> {
+        static SUBJECTS: [[u8; 32]; 1] = [[0x33; 32]];
+        static DESTINATIONS: [CardanoAddressV1; 1] = [CardanoAddressV1 {
+            bytes: [0x55; 57],
+            length: 57,
+        }];
+        StaticRegistry {
+            allocation_id: ALLOCATION_ID,
+            basis_lovelace: DEMO_BASIS_LOVELACE,
+            authorized_subjects: &SUBJECTS,
+            approved_asset: AssetIdV1::ADA,
+            approved_destinations: &DESTINATIONS,
+        }
+    }
+
+    #[test]
+    fn authorize_disbursement_allows_happy_path() {
+        let r = authorize_disbursement(
+            &sample_intent(),
+            &ok_anchor(),
+            &full_ok_registry(),
+            FRESH_NOW_MS,
+        );
+        match r {
+            AuthorizationResult::Authorized { effect } => {
+                assert_eq!(effect.authorized_amount_lovelace, 700_000_000);
+                assert_eq!(effect.release_cap_basis_points, 7_500);
+            }
+            AuthorizationResult::Denied { reason, gate } => {
+                panic!("expected Authorized, got Denied {{ {reason:?}, {gate:?} }}");
+            }
+        }
+    }
+
+    #[test]
+    fn authorize_disbursement_denies_at_anchor_with_unregistered_policy() {
+        let anchor = StaticAnchor { registered: &[] };
+        let r = authorize_disbursement(
+            &sample_intent(),
+            &anchor,
+            &full_ok_registry(),
+            FRESH_NOW_MS,
+        );
+        assert_eq!(
+            r,
+            AuthorizationResult::Denied {
+                reason: DisbursementReasonCode::PolicyNotFound,
+                gate: AuthorizationGate::Anchor,
+            },
+        );
+    }
+
+    #[test]
+    fn authorize_disbursement_denies_at_registry_with_missing_allocation() {
+        let mut registry = full_ok_registry();
+        registry.allocation_id = [0xDE; 32];
+        let r = authorize_disbursement(&sample_intent(), &ok_anchor(), &registry, FRESH_NOW_MS);
+        assert_eq!(
+            r,
+            AuthorizationResult::Denied {
+                reason: DisbursementReasonCode::AllocationNotFound,
+                gate: AuthorizationGate::Registry,
+            },
+        );
+    }
+
+    #[test]
+    fn authorize_disbursement_denies_at_grant_with_stale_oracle() {
+        let r = authorize_disbursement(
+            &sample_intent(),
+            &ok_anchor(),
+            &full_ok_registry(),
+            STALE_NOW_MS,
+        );
+        assert_eq!(
+            r,
+            AuthorizationResult::Denied {
+                reason: DisbursementReasonCode::OracleStale,
+                gate: AuthorizationGate::Grant,
+            },
+        );
+    }
+
+    #[test]
+    fn authorize_disbursement_anchor_failure_precedes_registry_failure() {
+        // Both anchor and registry are invalid; anchor must win.
+        let anchor = StaticAnchor { registered: &[] };
+        let mut registry = full_ok_registry();
+        registry.allocation_id = [0xDE; 32];
+        let r = authorize_disbursement(&sample_intent(), &anchor, &registry, FRESH_NOW_MS);
+        assert_eq!(
+            r,
+            AuthorizationResult::Denied {
+                reason: DisbursementReasonCode::PolicyNotFound,
+                gate: AuthorizationGate::Anchor,
+            },
+        );
+    }
+
+    #[test]
+    fn authorize_disbursement_registry_failure_precedes_grant_failure() {
+        // Registry invalid AND oracle stale; registry must win.
+        let mut registry = full_ok_registry();
+        registry.allocation_id = [0xDE; 32];
+        let r = authorize_disbursement(&sample_intent(), &ok_anchor(), &registry, STALE_NOW_MS);
+        assert_eq!(
+            r,
+            AuthorizationResult::Denied {
+                reason: DisbursementReasonCode::AllocationNotFound,
+                gate: AuthorizationGate::Registry,
+            },
+        );
+    }
+
+    #[test]
+    fn authorize_disbursement_anchor_failure_precedes_grant_failure() {
+        // Anchor invalid AND oracle stale; anchor must win.
+        let anchor = StaticAnchor { registered: &[] };
+        let r = authorize_disbursement(
+            &sample_intent(),
+            &anchor,
+            &full_ok_registry(),
+            STALE_NOW_MS,
+        );
+        assert_eq!(
+            r,
+            AuthorizationResult::Denied {
+                reason: DisbursementReasonCode::PolicyNotFound,
+                gate: AuthorizationGate::Anchor,
+            },
+        );
+    }
+
+    #[test]
+    fn authorize_disbursement_is_deterministic() {
+        let intent = sample_intent();
+        for _ in 0..4 {
+            let a = authorize_disbursement(
+                &intent,
+                &ok_anchor(),
+                &full_ok_registry(),
+                FRESH_NOW_MS,
+            );
+            let b = authorize_disbursement(
+                &intent,
+                &ok_anchor(),
+                &full_ok_registry(),
+                FRESH_NOW_MS,
+            );
+            assert_eq!(a, b);
+        }
+    }
+
+    #[test]
+    fn authorize_disbursement_denied_gate_equals_reason_gate() {
+        // Invariant: every Denied result has gate == reason.gate().
+        let cases: &[(AuthorizationResult, DisbursementReasonCode)] = &[
+            (
+                authorize_disbursement(
+                    &sample_intent(),
+                    &StaticAnchor { registered: &[] },
+                    &full_ok_registry(),
+                    FRESH_NOW_MS,
+                ),
+                DisbursementReasonCode::PolicyNotFound,
+            ),
+            (
+                {
+                    let mut r = full_ok_registry();
+                    r.allocation_id = [0xDE; 32];
+                    authorize_disbursement(&sample_intent(), &ok_anchor(), &r, FRESH_NOW_MS)
+                },
+                DisbursementReasonCode::AllocationNotFound,
+            ),
+            (
+                authorize_disbursement(
+                    &sample_intent(),
+                    &ok_anchor(),
+                    &full_ok_registry(),
+                    STALE_NOW_MS,
+                ),
+                DisbursementReasonCode::OracleStale,
+            ),
+        ];
+        for (result, expected_reason) in cases {
+            match result {
+                AuthorizationResult::Denied { reason, gate } => {
+                    assert_eq!(*reason, *expected_reason);
+                    assert_eq!(*gate, reason.gate());
+                }
+                AuthorizationResult::Authorized { .. } => {
+                    panic!("expected Denied result, got Authorized");
+                }
+            }
+        }
     }
 
     #[test]

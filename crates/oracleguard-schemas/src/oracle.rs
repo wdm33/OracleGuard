@@ -55,6 +55,48 @@ pub struct OracleFactProvenanceV1 {
     pub aggregator_utxo_ref: [u8; 32],
 }
 
+/// Returned by [`check_freshness`] when the oracle datum's
+/// `expiry_unix` has already passed at the given wall-clock value.
+///
+/// Kept as its own error type so freshness failure cannot be confused
+/// with CBOR-shape or price-validation failures. Callers map this to
+/// [`crate::reason::DisbursementReasonCode::OracleStale`] at the
+/// authorization boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct OracleStale {
+    /// `OracleFactProvenanceV1::expiry_unix` — expiry posix ms from
+    /// the datum.
+    pub expiry_unix_ms: u64,
+    /// Wall-clock value the freshness check was evaluated against.
+    pub now_unix_ms: u64,
+}
+
+/// Pure freshness check for an [`OracleFactProvenanceV1`].
+///
+/// `now_unix_ms` is an explicit argument so this function stays
+/// deterministic and testable. The caller — a shell — is responsible
+/// for reading the wall clock. An expired datum must not reach the
+/// evaluator; the grant gate treats [`OracleStale`] as the typed
+/// rejection and maps it onto
+/// [`crate::reason::DisbursementReasonCode::OracleStale`].
+///
+/// A datum is fresh when `now_unix_ms < expiry_unix`. Equality at
+/// expiry is stale by design (the datum is no longer usable at the
+/// instant it expires).
+pub fn check_freshness(
+    provenance: &OracleFactProvenanceV1,
+    now_unix_ms: u64,
+) -> Result<(), OracleStale> {
+    if now_unix_ms < provenance.expiry_unix {
+        Ok(())
+    } else {
+        Err(OracleStale {
+            expiry_unix_ms: provenance.expiry_unix,
+            now_unix_ms,
+        })
+    }
+}
+
 /// Canonical 16-byte identifier for the ADA/USD asset pair.
 ///
 /// The seven ASCII bytes of `"ADA/USD"` followed by nine zero bytes.

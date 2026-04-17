@@ -24,6 +24,13 @@ use oracleguard_schemas::oracle::{
 };
 use oracleguard_schemas::reason::{validate_oracle_fact_eval, DisbursementReasonCode};
 
+// The freshness check and its typed rejection moved to
+// `oracleguard-schemas::oracle` in Cluster 5 Slice 05 so the policy
+// crate can consume them without depending on the adapter. They are
+// re-exported here to keep `oracleguard_adapter::charli3::check_freshness`
+// a stable public API.
+pub use oracleguard_schemas::oracle::{check_freshness, OracleStale};
+
 /// Plutus constructor tags used in the AggState datum.
 ///
 /// Plutus encodes data-constructors as CBOR tags in the range
@@ -93,18 +100,6 @@ pub enum Charli3ParseError {
     /// `{0, 1, 2}`, or a duplicate key. Either case would change the
     /// authoritative meaning of the datum silently and is rejected.
     UnexpectedMapKey,
-}
-
-/// Returned by [`check_freshness`] when the AggState datum has expired.
-///
-/// Kept as its own error type so the freshness check cannot be
-/// confused with a CBOR-shape failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct OracleStale {
-    /// `price_map[2]` — expiry posix ms from the datum.
-    pub expiry_unix_ms: u64,
-    /// Wall-clock value the freshness check was evaluated against.
-    pub now_unix_ms: u64,
 }
 
 /// Parse an AggState inline-datum byte sequence into its typed form.
@@ -339,28 +334,6 @@ pub fn normalize_parse_validate(
         return Err(NormalizeRejection::Reason(DisbursementReasonCode::OracleStale));
     }
     Ok((eval, provenance))
-}
-
-/// Pure freshness check.
-///
-/// `now_unix_ms` is taken as an explicit argument so this function
-/// stays deterministic and testable. The caller — a shell — is
-/// responsible for reading the wall clock. An expired datum must not
-/// reach the evaluator; the adapter is expected to treat
-/// [`OracleStale`] as the typed rejection for that case and map it
-/// onto the authoritative reason-code surface at the policy boundary.
-pub fn check_freshness(
-    provenance: &OracleFactProvenanceV1,
-    now_unix_ms: u64,
-) -> Result<(), OracleStale> {
-    if now_unix_ms < provenance.expiry_unix {
-        Ok(())
-    } else {
-        Err(OracleStale {
-            expiry_unix_ms: provenance.expiry_unix,
-            now_unix_ms,
-        })
-    }
 }
 
 #[cfg(test)]
