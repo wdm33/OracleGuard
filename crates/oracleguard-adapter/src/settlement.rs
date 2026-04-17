@@ -4,8 +4,8 @@
 //! [`oracleguard_schemas::effect::AuthorizedEffectV1`] into a typed
 //! settlement request.
 //!
-//! Later Cluster 7 slices extend this module with the ADA-only MVP
-//! guard (Slice 03), the deny/no-tx closure and
+//! Later Cluster 7 slices extend this module with the deny/no-tx
+//! closure and
 //! [`SettlementBackend`](crate::cardano::CardanoCliSettlementBackend)
 //! trait (Slice 04), and the typed fulfillment-outcome surface that
 //! Cluster 8 evidence work consumes (Slice 05).
@@ -65,6 +65,41 @@ pub struct SettlementRequest {
     /// the backend for idempotency / correlation only; it is NOT a
     /// Cardano transaction field.
     pub intent_id: [u8; 32],
+}
+
+// -------------------------------------------------------------------
+// Slice 03 — ADA-only MVP fulfillment guard
+// -------------------------------------------------------------------
+
+/// Closed set of fulfillment-side rejection kinds.
+///
+/// These are distinct from
+/// [`oracleguard_schemas::reason::DisbursementReasonCode`]: an
+/// upstream deny carries a reason and a gate; a fulfillment-side
+/// rejection means authorization was allowed but the MVP shell still
+/// cannot execute the transaction. Slice 04 extends this enum with
+/// `ReceiptNotCommitted` for pending-status receipts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FulfillmentRejection {
+    /// The authorized effect's asset is not ADA. The MVP supports
+    /// ADA-only settlement; a non-ADA authorized effect indicates a
+    /// registry misconfiguration upstream and is surfaced as a typed
+    /// rejection rather than silently dropped.
+    NonAdaAsset,
+}
+
+/// Reject any authorized effect whose asset is not byte-identical to
+/// [`AssetIdV1::ADA`].
+///
+/// The MVP settlement path supports exactly one asset: ADA. This
+/// guard is the mechanical enforcement of that scope; any future
+/// multi-asset slice must revisit it alongside the registry gate and
+/// the evidence verifier.
+pub fn guard_mvp_asset(effect: &AuthorizedEffectV1) -> Result<(), FulfillmentRejection> {
+    if effect.asset != AssetIdV1::ADA {
+        return Err(FulfillmentRejection::NonAdaAsset);
+    }
+    Ok(())
 }
 
 /// Pure mapping from an authorized effect plus a consensus
@@ -185,5 +220,57 @@ mod tests {
         let ra = settlement_request_from_effect(&a, [0x00; 32]);
         let rb = settlement_request_from_effect(&b, [0x00; 32]);
         assert_eq!(ra, rb);
+    }
+
+    // ---- Slice 03 — ADA-only guard ----
+
+    #[test]
+    fn ada_asset_passes_guard() {
+        let effect = sample_effect();
+        assert_eq!(effect.asset, AssetIdV1::ADA);
+        assert_eq!(guard_mvp_asset(&effect), Ok(()));
+    }
+
+    #[test]
+    fn non_ada_policy_id_is_rejected() {
+        let mut effect = sample_effect();
+        effect.asset.policy_id = [0xAB; 28];
+        assert_eq!(
+            guard_mvp_asset(&effect),
+            Err(FulfillmentRejection::NonAdaAsset),
+        );
+    }
+
+    #[test]
+    fn non_ada_asset_name_len_is_rejected() {
+        let mut effect = sample_effect();
+        effect.asset.asset_name_len = 5;
+        effect.asset.asset_name[..5].copy_from_slice(b"OTHER");
+        assert_eq!(
+            guard_mvp_asset(&effect),
+            Err(FulfillmentRejection::NonAdaAsset),
+        );
+    }
+
+    #[test]
+    fn non_zero_asset_name_bytes_with_zero_len_are_not_ada() {
+        // ADA is *byte-identical* to AssetIdV1::ADA. A non-zero
+        // padding byte with asset_name_len == 0 is structurally not
+        // ADA and must be rejected.
+        let mut effect = sample_effect();
+        effect.asset.asset_name[0] = 0x01;
+        assert_ne!(effect.asset, AssetIdV1::ADA);
+        assert_eq!(
+            guard_mvp_asset(&effect),
+            Err(FulfillmentRejection::NonAdaAsset),
+        );
+    }
+
+    #[test]
+    fn guard_is_deterministic() {
+        let effect = sample_effect();
+        for _ in 0..4 {
+            assert_eq!(guard_mvp_asset(&effect), Ok(()));
+        }
     }
 }
