@@ -54,3 +54,72 @@ pub struct OracleFactProvenanceV1 {
     pub expiry_unix: u64,
     pub aggregator_utxo_ref: [u8; 32],
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    fn sample_eval() -> OracleFactEvalV1 {
+        OracleFactEvalV1 {
+            asset_pair: *b"ADA/USD\0\0\0\0\0\0\0\0\0",
+            price_microusd: 258_000,
+            source: *b"charli3\0\0\0\0\0\0\0\0\0",
+        }
+    }
+
+    fn sample_provenance() -> OracleFactProvenanceV1 {
+        OracleFactProvenanceV1 {
+            timestamp_unix: 1_713_000_000_000,
+            expiry_unix: 1_713_000_300_000,
+            aggregator_utxo_ref: [0x44; 32],
+        }
+    }
+
+    // Destructuring guard: the pattern match below forces a compile
+    // error if a field is silently added or removed from
+    // `OracleFactEvalV1`. Adding a field is a canonical-byte change
+    // and a Cluster 3 boundary change; it must not pass unnoticed.
+    #[test]
+    fn eval_struct_exposes_exact_fixed_width_fields() {
+        let OracleFactEvalV1 {
+            asset_pair,
+            price_microusd,
+            source,
+        } = sample_eval();
+        assert_eq!(asset_pair.len(), 16);
+        assert_eq!(price_microusd, 258_000);
+        assert_eq!(source.len(), 16);
+    }
+
+    // Destructuring guard: the pattern match below forces a compile
+    // error if a field is silently added or removed from
+    // `OracleFactProvenanceV1`. New provenance fields are allowed but
+    // must be added deliberately and reviewed against the
+    // non-interference tests before landing.
+    #[test]
+    fn provenance_struct_exposes_exact_fixed_width_fields() {
+        let OracleFactProvenanceV1 {
+            timestamp_unix,
+            expiry_unix,
+            aggregator_utxo_ref,
+        } = sample_provenance();
+        assert_eq!(timestamp_unix, 1_713_000_000_000);
+        assert_eq!(expiry_unix, 1_713_000_300_000);
+        assert_eq!(aggregator_utxo_ref.len(), 32);
+    }
+
+    #[test]
+    fn eval_struct_is_copy_and_equates_by_value() {
+        let a = sample_eval();
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn provenance_struct_is_copy_and_equates_by_value() {
+        let a = sample_provenance();
+        let b = a;
+        assert_eq!(a, b);
+    }
+}
