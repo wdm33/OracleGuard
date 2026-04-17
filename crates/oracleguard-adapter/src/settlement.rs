@@ -4,11 +4,11 @@
 //! [`oracleguard_schemas::effect::AuthorizedEffectV1`] into a typed
 //! settlement request.
 //!
-//! Later Cluster 7 slices extend this module with the deny/no-tx
-//! closure and
-//! [`SettlementBackend`](crate::cardano::CardanoCliSettlementBackend)
-//! trait (Slice 04), and the typed fulfillment-outcome surface that
-//! Cluster 8 evidence work consumes (Slice 05).
+//! Slice 04 closes the deny/no-tx boundary and wires the allow path
+//! to a [`SettlementBackend`](crate::cardano::SettlementBackend)
+//! via the [`fulfill`] entrypoint. The typed
+//! [`FulfillmentOutcome`] surface is what Cluster 8 evidence work
+//! consumes.
 //!
 //! Does NOT own:
 //!
@@ -28,7 +28,13 @@
 //! production source is pure (no I/O, no wall-clock reads, no mutable
 //! global state).
 
+use oracleguard_policy::authorize::AuthorizationResult;
 use oracleguard_schemas::effect::{AssetIdV1, AuthorizedEffectV1, CardanoAddressV1};
+use oracleguard_schemas::gate::AuthorizationGate;
+use oracleguard_schemas::reason::DisbursementReasonCode;
+
+use crate::cardano::{CardanoTxHashV1, SettlementBackend, SettlementSubmitError};
+use crate::intake::{IntentReceiptV1, IntentStatus};
 
 // -------------------------------------------------------------------
 // Slice 02 — Exact effect-to-settlement mapping
@@ -86,6 +92,10 @@ pub enum FulfillmentRejection {
     /// registry misconfiguration upstream and is surfaced as a typed
     /// rejection rather than silently dropped.
     NonAdaAsset,
+    /// The consensus receipt is not in [`IntentStatus::Committed`].
+    /// Settlement requires a committed decision; pending receipts are
+    /// never executed, and the caller MUST re-query before acting.
+    ReceiptNotCommitted,
 }
 
 /// Reject any authorized effect whose asset is not byte-identical to
@@ -120,6 +130,99 @@ pub fn settlement_request_from_effect(
         asset: effect.asset,
         amount_lovelace: effect.authorized_amount_lovelace,
         intent_id,
+    }
+}
+
+// -------------------------------------------------------------------
+// Slice 04 — Deny / no-transaction closure
+// -------------------------------------------------------------------
+
+/// Typed execution-outcome surface consumed by Cluster 8 evidence.
+///
+/// Every possible outcome of a single [`fulfill`] call maps to
+/// exactly one variant. `Settled` is the only variant that
+/// corresponds to a submitted Cardano transaction; the other variants
+/// represent no-transaction closures with their cause made explicit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FulfillmentOutcome {
+    /// The allow path executed and the settlement backend returned a
+    /// captured transaction hash. This is the only outcome that
+    /// corresponds to a submitted Cardano transaction.
+    Settled {
+        /// Captured 32-byte Cardano transaction id.
+        tx_hash: CardanoTxHashV1,
+    },
+    /// Authorization was denied upstream of OracleGuard; no Cardano
+    /// transaction is possible. `reason` and `gate` are copied
+    /// verbatim from the consensus receipt — OracleGuard does not
+    /// translate denial reasons.
+    DeniedUpstream {
+        /// Canonical denial reason produced by the failing gate.
+        reason: DisbursementReasonCode,
+        /// The failing gate. Invariant: `gate == reason.gate()`.
+        gate: AuthorizationGate,
+    },
+    /// Authorization allowed the disbursement but the fulfillment
+    /// boundary rejected it before the backend was called.
+    RejectedAtFulfillment {
+        /// Reason the fulfillment boundary refused to submit.
+        kind: FulfillmentRejection,
+    },
+}
+
+/// Execute the Cardano fulfillment boundary for a consensus receipt.
+///
+/// `fulfill` is the single public entry point that turns an
+/// [`IntentReceiptV1`] into a typed [`FulfillmentOutcome`]. Its
+/// branch structure is the mechanical no-tx closure (see
+/// `docs/fulfillment-boundary.md §4`):
+///
+/// 1. If the receipt is not committed →
+///    [`FulfillmentOutcome::RejectedAtFulfillment`] with
+///    [`FulfillmentRejection::ReceiptNotCommitted`]. **Backend is not
+///    called.**
+/// 2. If the receipt carries
+///    [`AuthorizationResult::Denied`] →
+///    [`FulfillmentOutcome::DeniedUpstream`] with `reason` and `gate`
+///    copied verbatim. **Backend is not called.**
+/// 3. If the receipt carries [`AuthorizationResult::Authorized`] but
+///    the ADA-only guard rejects →
+///    [`FulfillmentOutcome::RejectedAtFulfillment`] with
+///    [`FulfillmentRejection::NonAdaAsset`]. **Backend is not
+///    called.**
+/// 4. Otherwise a [`SettlementRequest`] is built via
+///    [`settlement_request_from_effect`] and handed to
+///    `backend.submit`. On success →
+///    [`FulfillmentOutcome::Settled`] with the captured
+///    [`CardanoTxHashV1`]. On backend error → the error is returned
+///    verbatim to the caller.
+///
+/// The backend reference is only reachable from branch 4. A
+/// structural audit test in this module pins that the production
+/// source does not call any evaluator or authorization-gate
+/// function.
+pub fn fulfill(
+    receipt: &IntentReceiptV1,
+    backend: &impl SettlementBackend,
+) -> Result<FulfillmentOutcome, SettlementSubmitError> {
+    if receipt.status != IntentStatus::Committed {
+        return Ok(FulfillmentOutcome::RejectedAtFulfillment {
+            kind: FulfillmentRejection::ReceiptNotCommitted,
+        });
+    }
+
+    match receipt.output {
+        AuthorizationResult::Denied { reason, gate } => {
+            Ok(FulfillmentOutcome::DeniedUpstream { reason, gate })
+        }
+        AuthorizationResult::Authorized { effect } => {
+            if let Err(kind) = guard_mvp_asset(&effect) {
+                return Ok(FulfillmentOutcome::RejectedAtFulfillment { kind });
+            }
+            let request = settlement_request_from_effect(&effect, receipt.intent_id);
+            let tx_hash = backend.submit(&request)?;
+            Ok(FulfillmentOutcome::Settled { tx_hash })
+        }
     }
 }
 
@@ -271,6 +374,244 @@ mod tests {
         let effect = sample_effect();
         for _ in 0..4 {
             assert_eq!(guard_mvp_asset(&effect), Ok(()));
+        }
+    }
+
+    // ---- Slice 04 — deny / no-tx closure ----
+
+    use std::cell::RefCell;
+
+    use oracleguard_policy::authorize::AuthorizationResult;
+    use oracleguard_schemas::gate::AuthorizationGate;
+    use oracleguard_schemas::reason::DisbursementReasonCode;
+
+    use crate::cardano::{CardanoTxHashV1, SettlementSubmitError};
+    use crate::intake::{IntentReceiptV1, IntentStatus};
+
+    /// Deterministic fixture backend that records every
+    /// [`SettlementRequest`] it sees and returns a pinned tx hash.
+    ///
+    /// This is a seeded deterministic substitute, not a mock of the
+    /// functional core — see `CLAUDE.md "No-Mocks Contract"`.
+    struct CountingFixtureBackend {
+        tx_hash: CardanoTxHashV1,
+        requests: RefCell<Vec<SettlementRequest>>,
+    }
+
+    impl CountingFixtureBackend {
+        fn new(tx_hash: CardanoTxHashV1) -> Self {
+            Self {
+                tx_hash,
+                requests: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn submit_count(&self) -> usize {
+            self.requests.borrow().len()
+        }
+
+        fn last_request(&self) -> Option<SettlementRequest> {
+            self.requests.borrow().last().copied()
+        }
+    }
+
+    impl SettlementBackend for CountingFixtureBackend {
+        fn submit(
+            &self,
+            request: &SettlementRequest,
+        ) -> Result<CardanoTxHashV1, SettlementSubmitError> {
+            self.requests.borrow_mut().push(*request);
+            Ok(self.tx_hash)
+        }
+    }
+
+    fn committed_authorized_receipt(effect: AuthorizedEffectV1) -> IntentReceiptV1 {
+        IntentReceiptV1 {
+            intent_id: [0xAA; 32],
+            status: IntentStatus::Committed,
+            committed_height: 100,
+            output: AuthorizationResult::Authorized { effect },
+        }
+    }
+
+    fn committed_denied_receipt(
+        reason: DisbursementReasonCode,
+        gate: AuthorizationGate,
+    ) -> IntentReceiptV1 {
+        IntentReceiptV1 {
+            intent_id: [0xBB; 32],
+            status: IntentStatus::Committed,
+            committed_height: 100,
+            output: AuthorizationResult::Denied { reason, gate },
+        }
+    }
+
+    #[test]
+    fn every_deny_reason_short_circuits_without_backend_call() {
+        let cases = [
+            (DisbursementReasonCode::PolicyNotFound, AuthorizationGate::Anchor),
+            (DisbursementReasonCode::AllocationNotFound, AuthorizationGate::Registry),
+            (DisbursementReasonCode::SubjectNotAuthorized, AuthorizationGate::Registry),
+            (DisbursementReasonCode::AssetMismatch, AuthorizationGate::Registry),
+            (DisbursementReasonCode::OracleStale, AuthorizationGate::Grant),
+            (DisbursementReasonCode::OraclePriceZero, AuthorizationGate::Grant),
+            (DisbursementReasonCode::AmountZero, AuthorizationGate::Grant),
+            (DisbursementReasonCode::ReleaseCapExceeded, AuthorizationGate::Grant),
+        ];
+        for (reason, gate) in cases {
+            let backend = CountingFixtureBackend::new(CardanoTxHashV1([0x00; 32]));
+            let receipt = committed_denied_receipt(reason, gate);
+            let out = fulfill(&receipt, &backend).expect("fulfill");
+            assert_eq!(
+                out,
+                FulfillmentOutcome::DeniedUpstream { reason, gate },
+                "reason {reason:?} did not produce verbatim DeniedUpstream"
+            );
+            assert_eq!(
+                backend.submit_count(),
+                0,
+                "backend called on deny path for {reason:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pending_receipt_short_circuits_without_backend_call() {
+        let backend = CountingFixtureBackend::new(CardanoTxHashV1([0x00; 32]));
+        let receipt = IntentReceiptV1 {
+            intent_id: [0xCC; 32],
+            status: IntentStatus::Pending,
+            committed_height: 0,
+            output: AuthorizationResult::Authorized {
+                effect: sample_effect(),
+            },
+        };
+        let out = fulfill(&receipt, &backend).expect("fulfill");
+        assert_eq!(
+            out,
+            FulfillmentOutcome::RejectedAtFulfillment {
+                kind: FulfillmentRejection::ReceiptNotCommitted,
+            }
+        );
+        assert_eq!(backend.submit_count(), 0);
+    }
+
+    #[test]
+    fn non_ada_authorized_effect_short_circuits_without_backend_call() {
+        let backend = CountingFixtureBackend::new(CardanoTxHashV1([0x00; 32]));
+        let mut effect = sample_effect();
+        effect.asset.policy_id = [0xAB; 28];
+        let receipt = committed_authorized_receipt(effect);
+        let out = fulfill(&receipt, &backend).expect("fulfill");
+        assert_eq!(
+            out,
+            FulfillmentOutcome::RejectedAtFulfillment {
+                kind: FulfillmentRejection::NonAdaAsset,
+            }
+        );
+        assert_eq!(backend.submit_count(), 0);
+    }
+
+    #[test]
+    fn authorized_ada_effect_calls_backend_exactly_once() {
+        let backend = CountingFixtureBackend::new(CardanoTxHashV1([0xCD; 32]));
+        let receipt = committed_authorized_receipt(sample_effect());
+        let out = fulfill(&receipt, &backend).expect("fulfill");
+        assert_eq!(
+            out,
+            FulfillmentOutcome::Settled {
+                tx_hash: CardanoTxHashV1([0xCD; 32]),
+            }
+        );
+        assert_eq!(backend.submit_count(), 1);
+        let req = backend.last_request().expect("one request");
+        let expected = settlement_request_from_effect(&sample_effect(), [0xAA; 32]);
+        assert_eq!(req, expected);
+    }
+
+    #[test]
+    fn fulfill_is_deterministic_for_deny() {
+        let backend = CountingFixtureBackend::new(CardanoTxHashV1([0x00; 32]));
+        let receipt = committed_denied_receipt(
+            DisbursementReasonCode::OracleStale,
+            AuthorizationGate::Grant,
+        );
+        let a = fulfill(&receipt, &backend).expect("a");
+        let b = fulfill(&receipt, &backend).expect("b");
+        assert_eq!(a, b);
+        assert_eq!(backend.submit_count(), 0);
+    }
+
+    #[test]
+    fn fulfill_is_deterministic_for_reject() {
+        let backend = CountingFixtureBackend::new(CardanoTxHashV1([0x00; 32]));
+        let mut effect = sample_effect();
+        effect.asset.policy_id = [0xAB; 28];
+        let receipt = committed_authorized_receipt(effect);
+        let a = fulfill(&receipt, &backend).expect("a");
+        let b = fulfill(&receipt, &backend).expect("b");
+        assert_eq!(a, b);
+        assert_eq!(backend.submit_count(), 0);
+    }
+
+    #[test]
+    fn fulfill_is_deterministic_for_settled() {
+        let backend = CountingFixtureBackend::new(CardanoTxHashV1([0xEF; 32]));
+        let receipt = committed_authorized_receipt(sample_effect());
+        let a = fulfill(&receipt, &backend).expect("a");
+        let b = fulfill(&receipt, &backend).expect("b");
+        assert_eq!(a, b);
+        assert_eq!(backend.submit_count(), 2);
+    }
+
+    #[test]
+    fn settled_request_amount_equals_authorized_amount_exactly() {
+        for amount in [1u64, 100, 700_000_000, 1_000_000_000, u64::MAX] {
+            let backend = CountingFixtureBackend::new(CardanoTxHashV1([0x00; 32]));
+            let mut effect = sample_effect();
+            effect.authorized_amount_lovelace = amount;
+            let receipt = committed_authorized_receipt(effect);
+            fulfill(&receipt, &backend).expect("fulfill");
+            let req = backend.last_request().expect("one request");
+            assert_eq!(req.amount_lovelace, amount);
+        }
+    }
+
+    #[test]
+    fn settled_request_intent_id_equals_receipt_intent_id() {
+        let backend = CountingFixtureBackend::new(CardanoTxHashV1([0x00; 32]));
+        let mut receipt = committed_authorized_receipt(sample_effect());
+        receipt.intent_id = [0x99; 32];
+        fulfill(&receipt, &backend).expect("fulfill");
+        let req = backend.last_request().expect("one request");
+        assert_eq!(req.intent_id, [0x99; 32]);
+    }
+
+    // ---- Structural audit: production source must not recompute
+    // authorization ----
+    //
+    // Mirrors `intake::intake_does_not_recompute_authorization`.
+
+    #[test]
+    fn settlement_production_source_does_not_call_authorize_or_evaluate() {
+        const THIS_FILE: &str = include_str!("settlement.rs");
+        let split_marker = format!("{}[cfg(test)]", '#');
+        let (prod, _) = THIS_FILE
+            .split_once(split_marker.as_str())
+            .expect("production/test split marker must exist");
+        let call = |s: &str| format!("{s}(");
+        for sym in [
+            "authorize_disbursement",
+            "evaluate_disbursement",
+            "run_anchor_gate",
+            "run_registry_gate",
+            "run_grant_gate",
+        ] {
+            let pat = call(sym);
+            assert!(
+                !prod.contains(&pat),
+                "settlement production source must not call {sym}"
+            );
         }
     }
 }
