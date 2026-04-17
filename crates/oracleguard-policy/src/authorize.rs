@@ -27,6 +27,7 @@
 
 use oracleguard_schemas::effect::{AssetIdV1, AuthorizedEffectV1, CardanoAddressV1};
 use oracleguard_schemas::gate::AuthorizationGate;
+use oracleguard_schemas::intent::{validate_intent_version, DisbursementIntentV1};
 use oracleguard_schemas::reason::DisbursementReasonCode;
 
 /// Closed authorization result produced by the three-gate closure.
@@ -133,10 +134,86 @@ pub trait AllocationRegistryView {
     fn lookup(&self, allocation_id: &[u8; 32]) -> Option<AllocationFacts<'_>>;
 }
 
+// -------------------------------------------------------------------
+// Anchor gate (Cluster 5 Slice 03)
+// -------------------------------------------------------------------
+
+/// Run the anchor gate against a caller-supplied [`PolicyAnchorView`].
+///
+/// The anchor gate is the first gate in the three-gate closure. It
+/// validates that the intent is on a supported schema version and that
+/// its `policy_ref` is a registered policy identity. Both failures map
+/// to [`DisbursementReasonCode::PolicyNotFound`] because v1 treats
+/// "unsupported schema version" and "unregistered policy identity" as
+/// facets of the same anchor-gate failure.
+///
+/// ## Check order (pinned by `docs/authorization-gates.md`)
+///
+/// 1. `intent.intent_version != INTENT_VERSION_V1` →
+///    [`DisbursementReasonCode::PolicyNotFound`] (delegates to
+///    [`validate_intent_version`]).
+/// 2. `!anchor.is_policy_registered(&intent.policy_ref)` →
+///    [`DisbursementReasonCode::PolicyNotFound`].
+/// 3. `Ok(())` — the anchor gate passes. The registry gate may run.
+///
+/// ## Purity
+///
+/// This function is pure. It performs no I/O, reads no wall clock,
+/// and does not allocate. The trait argument is the single mediator
+/// through which anchor state reaches the gate.
+pub fn run_anchor_gate(
+    intent: &DisbursementIntentV1,
+    anchor: &impl PolicyAnchorView,
+) -> Result<(), DisbursementReasonCode> {
+    if validate_intent_version(intent).is_err() {
+        return Err(DisbursementReasonCode::PolicyNotFound);
+    }
+    if !anchor.is_policy_registered(&intent.policy_ref) {
+        return Err(DisbursementReasonCode::PolicyNotFound);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use oracleguard_schemas::intent::INTENT_VERSION_V1;
+    use oracleguard_schemas::oracle::{
+        OracleFactEvalV1, OracleFactProvenanceV1, ASSET_PAIR_ADA_USD, SOURCE_CHARLI3,
+    };
+
+    // ---- Shared test fixtures ----
+
+    const ANCHOR_POLICY_REF: [u8; 32] = [0x11; 32];
+    const ANCHOR_OTHER_POLICY_REF: [u8; 32] = [0xAA; 32];
+    const ALLOCATION_ID: [u8; 32] = [0x22; 32];
+    const REQUESTER_ID: [u8; 32] = [0x33; 32];
+
+    fn sample_intent() -> DisbursementIntentV1 {
+        DisbursementIntentV1 {
+            intent_version: INTENT_VERSION_V1,
+            policy_ref: ANCHOR_POLICY_REF,
+            allocation_id: ALLOCATION_ID,
+            requester_id: REQUESTER_ID,
+            oracle_fact: OracleFactEvalV1 {
+                asset_pair: ASSET_PAIR_ADA_USD,
+                price_microusd: 450_000,
+                source: SOURCE_CHARLI3,
+            },
+            oracle_provenance: OracleFactProvenanceV1 {
+                timestamp_unix: 1_713_000_000_000,
+                expiry_unix: 1_713_000_300_000,
+                aggregator_utxo_ref: [0x44; 32],
+            },
+            requested_amount_lovelace: 700_000_000,
+            destination: CardanoAddressV1 {
+                bytes: [0x55; 57],
+                length: 57,
+            },
+            asset: AssetIdV1::ADA,
+        }
+    }
 
     fn sample_effect() -> AuthorizedEffectV1 {
         AuthorizedEffectV1 {
@@ -150,6 +227,19 @@ mod tests {
             asset: AssetIdV1::ADA,
             authorized_amount_lovelace: 700_000_000,
             release_cap_basis_points: 7_500,
+        }
+    }
+
+    // Static in-memory implementation of `PolicyAnchorView`. No I/O,
+    // no mutation; the registered set is borrowed from a slice so
+    // each test can pick its own.
+    struct StaticAnchor<'a> {
+        registered: &'a [[u8; 32]],
+    }
+
+    impl<'a> PolicyAnchorView for StaticAnchor<'a> {
+        fn is_policy_registered(&self, policy_ref: &[u8; 32]) -> bool {
+            self.registered.iter().any(|r| r == policy_ref)
         }
     }
 
@@ -307,6 +397,123 @@ mod tests {
         for r in order {
             assert_eq!(r.gate(), AuthorizationGate::Registry);
         }
+    }
+
+    // ---- Anchor gate (Cluster 5 Slice 03) ----
+
+    #[test]
+    fn anchor_gate_passes_for_registered_v1_intent() {
+        let anchor = StaticAnchor {
+            registered: &[ANCHOR_POLICY_REF],
+        };
+        assert_eq!(run_anchor_gate(&sample_intent(), &anchor), Ok(()));
+    }
+
+    #[test]
+    fn anchor_gate_rejects_unregistered_policy_ref() {
+        let anchor = StaticAnchor {
+            registered: &[ANCHOR_OTHER_POLICY_REF],
+        };
+        assert_eq!(
+            run_anchor_gate(&sample_intent(), &anchor),
+            Err(DisbursementReasonCode::PolicyNotFound),
+        );
+    }
+
+    #[test]
+    fn anchor_gate_rejects_empty_registered_set() {
+        let anchor = StaticAnchor { registered: &[] };
+        assert_eq!(
+            run_anchor_gate(&sample_intent(), &anchor),
+            Err(DisbursementReasonCode::PolicyNotFound),
+        );
+    }
+
+    #[test]
+    fn anchor_gate_rejects_non_v1_intent_version() {
+        let anchor = StaticAnchor {
+            registered: &[ANCHOR_POLICY_REF],
+        };
+        let mut intent = sample_intent();
+        intent.intent_version = 2;
+        assert_eq!(
+            run_anchor_gate(&intent, &anchor),
+            Err(DisbursementReasonCode::PolicyNotFound),
+        );
+    }
+
+    #[test]
+    fn anchor_gate_rejects_zero_intent_version() {
+        let anchor = StaticAnchor {
+            registered: &[ANCHOR_POLICY_REF],
+        };
+        let mut intent = sample_intent();
+        intent.intent_version = 0;
+        assert_eq!(
+            run_anchor_gate(&intent, &anchor),
+            Err(DisbursementReasonCode::PolicyNotFound),
+        );
+    }
+
+    #[test]
+    fn anchor_gate_version_check_precedes_registration_check() {
+        // Both conditions invalid: version is non-v1 AND policy_ref is
+        // unregistered. The version check runs first, so the result
+        // must still be PolicyNotFound — but via the version branch.
+        // The reason is identical either way, which is why this test
+        // instead confirms the version branch triggers by using an
+        // anchor that would accept the policy_ref: the registration
+        // path is not consulted, yet denial still occurs.
+        let anchor = StaticAnchor {
+            registered: &[ANCHOR_POLICY_REF],
+        };
+        let mut intent = sample_intent();
+        intent.intent_version = 99;
+        assert_eq!(
+            run_anchor_gate(&intent, &anchor),
+            Err(DisbursementReasonCode::PolicyNotFound),
+        );
+    }
+
+    #[test]
+    fn anchor_gate_is_deterministic() {
+        let anchor = StaticAnchor {
+            registered: &[ANCHOR_POLICY_REF],
+        };
+        let intent = sample_intent();
+        let a = run_anchor_gate(&intent, &anchor);
+        let b = run_anchor_gate(&intent, &anchor);
+        assert_eq!(a, b);
+
+        let mut other = sample_intent();
+        other.policy_ref = ANCHOR_OTHER_POLICY_REF;
+        let c = run_anchor_gate(&other, &anchor);
+        let d = run_anchor_gate(&other, &anchor);
+        assert_eq!(c, d);
+    }
+
+    #[test]
+    fn anchor_gate_anchor_view_is_not_mutated() {
+        // Sanity: the trait has no &mut self; calling run_anchor_gate
+        // multiple times against the same anchor yields the same
+        // result because anchor state cannot change through the trait.
+        let anchor = StaticAnchor {
+            registered: &[ANCHOR_POLICY_REF],
+        };
+        let intent = sample_intent();
+        for _ in 0..4 {
+            assert_eq!(run_anchor_gate(&intent, &anchor), Ok(()));
+        }
+    }
+
+    #[test]
+    fn anchor_gate_failure_emits_reason_mapped_to_anchor_gate() {
+        // Every denial from run_anchor_gate must be a reason whose
+        // intrinsic .gate() is AuthorizationGate::Anchor. This ties
+        // the per-gate function to the reason-to-gate partition.
+        let anchor = StaticAnchor { registered: &[] };
+        let reason = run_anchor_gate(&sample_intent(), &anchor).unwrap_err();
+        assert_eq!(reason.gate(), AuthorizationGate::Anchor);
     }
 
     #[test]
