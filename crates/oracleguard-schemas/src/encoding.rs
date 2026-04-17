@@ -49,6 +49,23 @@ pub fn encode_intent(intent: &DisbursementIntentV1) -> Result<Vec<u8>, Canonical
     postcard::to_allocvec(intent).map_err(|_| CanonicalEncodeError::SerializerFailure)
 }
 
+/// Emit the canonical submission-payload bytes for an intent.
+///
+/// This is deliberately a named alias of [`encode_intent`]: the
+/// submission handoff owns only the canonical `DisbursementIntentV1`
+/// bytes, so call-sites that build the payload for the Ziranity CLI
+/// read as "emit the payload," not "encode an intent." Using a
+/// distinct public name also makes it textually clear that the
+/// boundary stops at these bytes — envelope, signing, and transport
+/// remain Ziranity-side concerns.
+///
+/// Any future divergence from `encode_intent` would break canonical
+/// identity and is forbidden; the `emit_payload_equals_encode_intent`
+/// test in Cluster 6 pins this equivalence.
+pub fn emit_payload(intent: &DisbursementIntentV1) -> Result<Vec<u8>, CanonicalEncodeError> {
+    encode_intent(intent)
+}
+
 /// Decode canonical bytes back into a [`DisbursementIntentV1`].
 ///
 /// The decoder is strict: trailing bytes after a successful decode are
@@ -402,6 +419,60 @@ mod tests {
             identity.len() < full.len(),
             "identity bytes must be shorter than full canonical bytes"
         );
+    }
+
+    // ---- Cluster 6 Slice 03: payload emission boundary ----
+
+    #[test]
+    fn emit_payload_equals_encode_intent() {
+        // The submission payload boundary is deliberately byte-for-byte
+        // identical to canonical intent encoding. Any divergence is a
+        // canonical-byte event.
+        let intent = fixture_intent();
+        let via_encode = encode(&intent);
+        let via_emit = match emit_payload(&intent) {
+            Ok(b) => b,
+            Err(e) => panic!("emit_payload failed: {e:?}"),
+        };
+        assert_eq!(via_emit, via_encode);
+    }
+
+    #[test]
+    fn emit_payload_matches_golden_fixture() {
+        let intent = fixture_intent();
+        let bytes = match emit_payload(&intent) {
+            Ok(b) => b,
+            Err(e) => panic!("emit_payload failed: {e:?}"),
+        };
+        assert_eq!(bytes.as_slice(), INTENT_GOLDEN);
+    }
+
+    #[test]
+    fn emit_payload_round_trips_via_decode_intent() {
+        // The submission payload IS the canonical intent. Decoding it
+        // must reconstruct the original intent with no loss, so
+        // verifier replay can recover the subject of authorization.
+        let intent = fixture_intent();
+        let bytes = match emit_payload(&intent) {
+            Ok(b) => b,
+            Err(e) => panic!("emit_payload failed: {e:?}"),
+        };
+        let decoded = decode(&bytes);
+        assert_eq!(decoded, intent);
+    }
+
+    #[test]
+    fn emit_payload_is_stable_across_calls() {
+        let intent = fixture_intent();
+        let a = match emit_payload(&intent) {
+            Ok(b) => b,
+            Err(e) => panic!("emit_payload failed: {e:?}"),
+        };
+        let b = match emit_payload(&intent) {
+            Ok(b) => b,
+            Err(e) => panic!("emit_payload failed: {e:?}"),
+        };
+        assert_eq!(a, b);
     }
 
     // Regenerate `fixtures/intent_v1_golden.postcard` when the fixture
