@@ -1,0 +1,13 @@
+/home/op/oracleguard/scripts/cardano_disburse.py
+--ogmios-url
+http://35.209.192.203:1337
+--pool-address
+addr_test1qz4f2vac8nn7tp802mxj3cu40a7xhhzc3agut6spq6rpz5rgtlvyed9yn3ncuv3fgaadfmvn64d7egjn824t7pj99xfs4y58d0
+--destination-bytes-hex
+000ee03e45b05d6225eb7143d2be23a3b8629b4d9e61621bb30afcc53a95474e79d1298d291e200a2c889fe13b97785cc41279629d99cfb87d
+--destination-length
+57
+--amount-lovelace
+700000000
+--intent-id
+7777777777777777777777777777777777777777777777777777777777777777

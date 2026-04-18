@@ -8,6 +8,7 @@
 
 pub mod artifacts;
 pub mod cardano;
+pub mod cardano_disburse;
 pub mod charli3;
 pub mod charli3_aggregate;
 pub mod intake;
