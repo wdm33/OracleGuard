@@ -31,3 +31,5 @@ jobs:
         run: cargo build --workspace --locked --verbose
       - name: cargo test --workspace
         run: ./scripts/deterministic_test.sh
+      - name: evidence-bundle determinism
+        run: ./scripts/check_evidence_determinism.sh

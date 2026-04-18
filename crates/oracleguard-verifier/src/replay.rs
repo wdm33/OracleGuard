@@ -36,6 +36,7 @@
 use oracleguard_policy::error::EvaluationResult;
 use oracleguard_policy::evaluate::evaluate_disbursement;
 use oracleguard_schemas::evidence::{AuthorizationSnapshotV1, DisbursementEvidenceV1};
+use oracleguard_schemas::intent::INTENT_VERSION_V1;
 use oracleguard_schemas::reason::DisbursementReasonCode;
 
 use crate::report::{VerifierFinding, VerifierReport};
@@ -76,6 +77,14 @@ fn expected_from_snapshot(snapshot: &AuthorizationSnapshotV1) -> Option<Evaluati
 /// inputs produce byte-identical `EvaluationResult` values. Any
 /// divergence is a bundle-tampering or crate-regression signal.
 pub fn check_replay_equivalence(evidence: &DisbursementEvidenceV1, report: &mut VerifierReport) {
+    // The evaluator has a v1-intent precondition (the anchor gate
+    // rejects off-version intents in production). Skipping replay
+    // when the intent is not v1 keeps the verifier from panicking on
+    // malformed bundles; the version mismatch is already surfaced by
+    // `check_integrity`.
+    if evidence.intent.intent_version != INTENT_VERSION_V1 {
+        return;
+    }
     let expected = match expected_from_snapshot(&evidence.authorization) {
         Some(e) => e,
         None => return, // Pre-evaluator gate failure — replay is a no-op.
