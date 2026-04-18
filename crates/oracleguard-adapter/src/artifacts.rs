@@ -670,4 +670,311 @@ mod tests {
         );
         std::fs::write(path, bytes).expect("write golden fixture");
     }
+
+    // ---- Golden refusal fixtures (Slice 04) ----
+    //
+    // Refusal evidence is distinct from denial. A denial is an
+    // upstream authorization outcome (consensus said "no"); a refusal
+    // is a fulfillment-side guard tripping after authorization allowed
+    // the effect. Both produce no Cardano transaction, but the cause
+    // is different. The MVP surfaces exactly two refusal kinds:
+    //
+    //  - `NonAdaAsset` — the authorized effect's asset is not ADA.
+    //  - `ReceiptNotCommitted` — consensus had not yet committed the
+    //    receipt when the fulfillment boundary was called.
+    //
+    // Each kind gets a pinned fixture so the verifier has concrete
+    // artifacts to inspect and CI has concrete bytes to watch for
+    // regressions.
+
+    const DEMO_COMMITTED_HEIGHT_NON_ADA: u64 = 10_123;
+    const DEMO_PENDING_HEIGHT: u64 = 0;
+
+    const REJECT_NON_ADA_GOLDEN: &[u8] =
+        include_bytes!("../../../fixtures/evidence/reject_non_ada_bundle.postcard");
+    const REJECT_PENDING_GOLDEN: &[u8] =
+        include_bytes!("../../../fixtures/evidence/reject_pending_bundle.postcard");
+
+    /// Non-ADA asset identifier used by the refusal fixture. The
+    /// specific bytes are a test sentinel; the only requirement is
+    /// `asset != AssetIdV1::ADA` so `guard_mvp_asset` trips.
+    fn non_ada_asset() -> AssetIdV1 {
+        AssetIdV1 {
+            policy_id: [0xAB; 28],
+            asset_name: [0u8; 32],
+            asset_name_len: 0,
+        }
+    }
+
+    fn demo_intent_non_ada(requested_amount_lovelace: u64) -> DisbursementIntentV1 {
+        DisbursementIntentV1 {
+            intent_version: INTENT_VERSION_V1,
+            policy_ref: DEMO_POLICY_REF,
+            allocation_id: DEMO_ALLOCATION_ID,
+            requester_id: DEMO_REQUESTER_ID,
+            oracle_fact: OracleFactEvalV1 {
+                asset_pair: ASSET_PAIR_ADA_USD,
+                price_microusd: DEMO_PRICE_MICROUSD,
+                source: SOURCE_CHARLI3,
+            },
+            oracle_provenance: OracleFactProvenanceV1 {
+                timestamp_unix: DEMO_CREATION_MS,
+                expiry_unix: DEMO_EXPIRY_MS,
+                aggregator_utxo_ref: [0x44; 32],
+            },
+            requested_amount_lovelace,
+            destination: demo_destination(),
+            asset: non_ada_asset(),
+        }
+    }
+
+    fn demo_non_ada_effect(authorized_amount_lovelace: u64) -> AuthorizedEffectV1 {
+        AuthorizedEffectV1 {
+            policy_ref: DEMO_POLICY_REF,
+            allocation_id: DEMO_ALLOCATION_ID,
+            requester_id: DEMO_REQUESTER_ID,
+            destination: demo_destination(),
+            asset: non_ada_asset(),
+            authorized_amount_lovelace,
+            release_cap_basis_points: DEMO_RELEASE_CAP_BPS,
+        }
+    }
+
+    fn demo_non_ada_receipt(intent: &DisbursementIntentV1) -> IntentReceiptV1 {
+        IntentReceiptV1 {
+            intent_id: intent_id(intent).expect("intent id"),
+            status: IntentStatus::Committed,
+            committed_height: DEMO_COMMITTED_HEIGHT_NON_ADA,
+            output: AuthorizationResult::Authorized {
+                effect: demo_non_ada_effect(intent.requested_amount_lovelace),
+            },
+        }
+    }
+
+    fn golden_reject_non_ada_evidence() -> DisbursementEvidenceV1 {
+        let intent = demo_intent_non_ada(DEMO_REQUEST_LOVELACE_ALLOW);
+        let receipt = demo_non_ada_receipt(&intent);
+        assemble_disbursement_evidence(
+            &intent,
+            &receipt,
+            FulfillmentOutcome::RejectedAtFulfillment {
+                kind: FulfillmentRejection::NonAdaAsset,
+            },
+            DEMO_BASIS_LOVELACE,
+            DEMO_NOW_MS,
+        )
+        .expect("assemble non-ada refusal")
+    }
+
+    fn demo_pending_receipt(intent: &DisbursementIntentV1) -> IntentReceiptV1 {
+        // A Pending receipt still carries output bytes in the intake
+        // shape; the evidence records whatever the CLI surfaced at
+        // fulfillment time so the chain stays reproducible. The
+        // fulfillment boundary refused to submit because status was
+        // not Committed.
+        IntentReceiptV1 {
+            intent_id: intent_id(intent).expect("intent id"),
+            status: IntentStatus::Pending,
+            committed_height: DEMO_PENDING_HEIGHT,
+            output: AuthorizationResult::Authorized {
+                effect: demo_effect(intent.requested_amount_lovelace),
+            },
+        }
+    }
+
+    fn golden_reject_pending_evidence() -> DisbursementEvidenceV1 {
+        let intent = demo_intent(DEMO_REQUEST_LOVELACE_ALLOW);
+        let receipt = demo_pending_receipt(&intent);
+        assemble_disbursement_evidence(
+            &intent,
+            &receipt,
+            FulfillmentOutcome::RejectedAtFulfillment {
+                kind: FulfillmentRejection::ReceiptNotCommitted,
+            },
+            DEMO_BASIS_LOVELACE,
+            DEMO_NOW_MS,
+        )
+        .expect("assemble pending refusal")
+    }
+
+    // ---- Non-ADA refusal fixture tests ----
+
+    #[test]
+    fn reject_non_ada_golden_decodes_to_expected_evidence() {
+        let expected = golden_reject_non_ada_evidence();
+        let decoded = decode_evidence(REJECT_NON_ADA_GOLDEN).expect("decode golden");
+        assert_eq!(decoded, expected);
+    }
+
+    #[test]
+    fn reject_non_ada_golden_encode_round_trips() {
+        let expected = golden_reject_non_ada_evidence();
+        let bytes = encode_evidence(&expected).expect("encode");
+        assert_eq!(bytes.as_slice(), REJECT_NON_ADA_GOLDEN);
+    }
+
+    #[test]
+    fn reject_non_ada_golden_records_authorized_with_non_ada_asset_and_no_tx() {
+        let decoded = decode_evidence(REJECT_NON_ADA_GOLDEN).expect("decode golden");
+
+        // Authorization passed upstream — the registry held a
+        // non-ADA-approved allocation and consensus authorized it.
+        match decoded.authorization {
+            AuthorizationSnapshotV1::Authorized { effect } => {
+                assert_ne!(effect.asset, AssetIdV1::ADA);
+                assert_eq!(effect.asset, non_ada_asset());
+                assert_eq!(
+                    effect.authorized_amount_lovelace,
+                    DEMO_REQUEST_LOVELACE_ALLOW
+                );
+            }
+            other => panic!("expected Authorized, got {other:?}"),
+        }
+
+        // Execution: refusal at the fulfillment boundary — no tx.
+        assert_eq!(
+            decoded.execution,
+            ExecutionOutcomeV1::RejectedAtFulfillment {
+                kind: FulfillmentRejectionKindV1::NonAdaAsset,
+            }
+        );
+        match decoded.execution {
+            ExecutionOutcomeV1::Settled { .. } => {
+                panic!("refusal bundle must not contain a Settled execution outcome")
+            }
+            ExecutionOutcomeV1::DeniedUpstream { .. }
+            | ExecutionOutcomeV1::RejectedAtFulfillment { .. } => {}
+        }
+
+        // Intent-id recomputation matches the recorded id.
+        let recomputed = intent_id(&decoded.intent).expect("intent id from decoded fixture");
+        assert_eq!(decoded.intent_id, recomputed);
+    }
+
+    /// Regenerate `fixtures/evidence/reject_non_ada_bundle.postcard`
+    /// when the fixture shape itself changes deliberately. Not run in
+    /// CI:
+    ///
+    /// ```text
+    /// cargo test -p oracleguard-adapter --lib \
+    ///   -- --ignored regenerate_reject_non_ada_golden_fixture
+    /// ```
+    #[test]
+    #[ignore = "regenerates golden fixture; run manually only"]
+    fn regenerate_reject_non_ada_golden_fixture() {
+        let evidence = golden_reject_non_ada_evidence();
+        let bytes = encode_evidence(&evidence).expect("encode");
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/evidence/reject_non_ada_bundle.postcard"
+        );
+        std::fs::write(path, bytes).expect("write golden fixture");
+    }
+
+    // ---- Pending-receipt refusal fixture tests ----
+
+    #[test]
+    fn reject_pending_golden_decodes_to_expected_evidence() {
+        let expected = golden_reject_pending_evidence();
+        let decoded = decode_evidence(REJECT_PENDING_GOLDEN).expect("decode golden");
+        assert_eq!(decoded, expected);
+    }
+
+    #[test]
+    fn reject_pending_golden_encode_round_trips() {
+        let expected = golden_reject_pending_evidence();
+        let bytes = encode_evidence(&expected).expect("encode");
+        assert_eq!(bytes.as_slice(), REJECT_PENDING_GOLDEN);
+    }
+
+    #[test]
+    fn reject_pending_golden_records_pending_refusal_and_no_tx() {
+        let decoded = decode_evidence(REJECT_PENDING_GOLDEN).expect("decode golden");
+
+        // Execution: refusal at the fulfillment boundary with the
+        // ReceiptNotCommitted kind. The authorization snapshot carries
+        // whatever the CLI surfaced at fulfillment time; the verifier
+        // treats this refusal as valid evidence regardless.
+        assert_eq!(
+            decoded.execution,
+            ExecutionOutcomeV1::RejectedAtFulfillment {
+                kind: FulfillmentRejectionKindV1::ReceiptNotCommitted,
+            }
+        );
+        assert_eq!(decoded.committed_height, DEMO_PENDING_HEIGHT);
+
+        // Intent, policy ref, allocation, destination linkage intact.
+        assert_eq!(decoded.intent.policy_ref, DEMO_POLICY_REF);
+        assert_eq!(decoded.intent.allocation_id, DEMO_ALLOCATION_ID);
+        let recomputed = intent_id(&decoded.intent).expect("intent id from decoded fixture");
+        assert_eq!(decoded.intent_id, recomputed);
+
+        // No tx_hash variant present.
+        match decoded.execution {
+            ExecutionOutcomeV1::Settled { .. } => {
+                panic!("refusal bundle must not contain a Settled execution outcome")
+            }
+            ExecutionOutcomeV1::DeniedUpstream { .. }
+            | ExecutionOutcomeV1::RejectedAtFulfillment { .. } => {}
+        }
+    }
+
+    /// Regenerate `fixtures/evidence/reject_pending_bundle.postcard`
+    /// when the fixture shape itself changes deliberately. Not run in
+    /// CI:
+    ///
+    /// ```text
+    /// cargo test -p oracleguard-adapter --lib \
+    ///   -- --ignored regenerate_reject_pending_golden_fixture
+    /// ```
+    #[test]
+    #[ignore = "regenerates golden fixture; run manually only"]
+    fn regenerate_reject_pending_golden_fixture() {
+        let evidence = golden_reject_pending_evidence();
+        let bytes = encode_evidence(&evidence).expect("encode");
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/evidence/reject_pending_bundle.postcard"
+        );
+        std::fs::write(path, bytes).expect("write golden fixture");
+    }
+
+    // ---- Cross-fixture distinctness ----
+
+    #[test]
+    fn deny_and_refusal_fixtures_carry_distinct_execution_surfaces() {
+        // Deny, NonAdaAsset refusal, and Pending refusal must all
+        // surface distinctly in the execution field. Collapsing any
+        // two of these is a regression: the cluster doc forbids
+        // "collapsing all non-success outcomes into one ambiguous
+        // bucket".
+        let deny = decode_evidence(DENY_900_ADA_GOLDEN).expect("deny");
+        let non_ada = decode_evidence(REJECT_NON_ADA_GOLDEN).expect("non-ada");
+        let pending = decode_evidence(REJECT_PENDING_GOLDEN).expect("pending");
+
+        match deny.execution {
+            ExecutionOutcomeV1::DeniedUpstream { .. } => {}
+            other => panic!("deny bundle: expected DeniedUpstream, got {other:?}"),
+        }
+        match non_ada.execution {
+            ExecutionOutcomeV1::RejectedAtFulfillment {
+                kind: FulfillmentRejectionKindV1::NonAdaAsset,
+            } => {}
+            other => {
+                panic!("non-ada bundle: expected RejectedAtFulfillment/NonAdaAsset, got {other:?}")
+            }
+        }
+        match pending.execution {
+            ExecutionOutcomeV1::RejectedAtFulfillment {
+                kind: FulfillmentRejectionKindV1::ReceiptNotCommitted,
+            } => {}
+            other => panic!(
+                "pending bundle: expected RejectedAtFulfillment/ReceiptNotCommitted, got {other:?}"
+            ),
+        }
+
+        assert_ne!(deny.execution, non_ada.execution);
+        assert_ne!(deny.execution, pending.execution);
+        assert_ne!(non_ada.execution, pending.execution);
+    }
 }
