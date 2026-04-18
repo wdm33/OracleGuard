@@ -11,5 +11,6 @@ pub mod cardano;
 pub mod charli3;
 pub mod charli3_aggregate;
 pub mod intake;
+pub mod kupo;
 pub mod settlement;
 pub mod ziranity_submit;

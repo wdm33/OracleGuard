@@ -11,6 +11,14 @@ description = "OracleGuard shell adapter: Charli3 fetch, Ziranity submit, Cardan
 oracleguard-schemas = { path = "../oracleguard-schemas" }
 oracleguard-policy = { path = "../oracleguard-policy" }
 minicbor = { version = "0.25", default-features = false, features = ["alloc"] }
+# HTTP + JSON for the Kupo fetch path. Blocking ureq (no tokio) and
+# serde_json are the minimum to pull a /matches list and a /datums
+# body. TLS is included via ureq defaults so the operator can point
+# at an HTTPS Kupo instance if desired; the hackathon's public
+# synced instance is plain HTTP.
+ureq = { version = "2", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [dev-dependencies]
 postcard = { version = "=1.1.1", default-features = false, features = ["alloc"] }
