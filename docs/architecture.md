@@ -114,31 +114,48 @@ The pinned surface it produced is:
   `crates/oracleguard-adapter/tests/fulfillment_boundary.rs`;
   `scripts/check_fulfillment_determinism.sh`
 
-Cluster 8 — Evidence Bundle and Offline Verification — lands its
-work at:
+Cluster 8 — Evidence Bundle and Offline Verification — landed the
+following public surfaces:
 
-- Evidence capture — assemble the bundle from canonical bytes
-  already produced by Cluster 6 (intent payload) and Cluster 7
-  (`FulfillmentOutcome`). Do NOT re-encode, re-derive, or re-run
-  authorization; consume the existing surfaces verbatim.
-- Allow-path reference — record the captured `CardanoTxHashV1`
-  from `FulfillmentOutcome::Settled { tx_hash }`; do NOT attempt
-  post-hoc reconstruction from logs.
-- Deny-path reference — record `(reason, gate)` from
-  `FulfillmentOutcome::DeniedUpstream` verbatim; no translation, no
-  retry path.
-- Fulfillment-side rejection — record
-  `FulfillmentOutcome::RejectedAtFulfillment { kind }` as its own
-  evidence-bundle category; it is neither an upstream deny nor a
-  settled transaction.
-- Offline verifier — replay from canonical bytes using the public
-  semantic types; it must not redefine effect, request, or outcome
-  meaning.
+- Canonical evidence schema `DisbursementEvidenceV1` linking
+  policy reference, canonical intent, evaluator inputs
+  (`allocation_basis_lovelace`, `now_unix_ms`), the three-gate
+  `AuthorizationSnapshotV1`, and the typed `ExecutionOutcomeV1`
+  (`Settled { tx_hash }`, `DeniedUpstream { reason, gate }`,
+  `RejectedAtFulfillment { kind }`) →
+  `crates/oracleguard-schemas/src/evidence.rs`
+- Evidence assembly from adapter-domain outcomes via `From` impls
+  (`CardanoTxHashV1 → [u8; 32]`,
+  `FulfillmentRejection → FulfillmentRejectionKindV1`,
+  `FulfillmentOutcome → ExecutionOutcomeV1`,
+  `AuthorizationResult → AuthorizationSnapshotV1`) plus
+  `assemble_disbursement_evidence` →
+  `crates/oracleguard-adapter/src/artifacts.rs`,
+  `crates/oracleguard-policy/src/authorize.rs`
+- Four MVP golden fixtures covering Settled, DeniedUpstream, and
+  both `RejectedAtFulfillment` kinds →
+  `fixtures/evidence/{allow_700_ada,deny_900_ada,reject_non_ada,reject_pending}_bundle.postcard`
+- Offline verifier (`verify_bundle`, `verify_evidence`) running
+  five checks — version pin, `intent_id` recomputation,
+  authorized-effect byte-identity against the intent,
+  `gate == reason.gate()` partition, cross-variant
+  authorization/execution matrix — plus pure-evaluator
+  replay-equivalence → `crates/oracleguard-verifier`
+- Typed closed-set `VerifierFinding` enum and `VerifierReport`
+  aggregate for byte-identically reproducible judge-facing
+  output → `crates/oracleguard-verifier/src/report.rs`
+- Verification-surface integration suite and CI gate →
+  `crates/oracleguard-verifier/tests/verification_surface.rs`;
+  `scripts/check_evidence_determinism.sh`
 
 See `docs/cluster-1-closeout.md`, `docs/cluster-2-closeout.md`,
 `docs/cluster-3-closeout.md`, `docs/cluster-4-closeout.md`,
-`docs/cluster-5-closeout.md`, `docs/cluster-6-closeout.md`, and
-`docs/cluster-7-closeout.md` for the prior handoff records.
+`docs/cluster-5-closeout.md`, `docs/cluster-6-closeout.md`,
+`docs/cluster-7-closeout.md`, and `docs/cluster-8-closeout.md` for
+the full handoff records. Cluster 8 completes the initial
+OracleGuard MVP invariant-cluster sequence;
+`docs/evidence-bundle.md` is the judge-facing public explanation of
+the verification surface.
 
 ## Private integration posture
 
