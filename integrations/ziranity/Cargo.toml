@@ -22,6 +22,11 @@ oracleguard-policy = { path = "../../crates/oracleguard-policy" }
 # coordinated development against an adjacent tree.
 ion_substrate_abi = { path = "../../../ziranity-v3/crates/ion_substrate_abi" }
 
+# Config loader. serde is already transitively pinned by
+# oracleguard-schemas; toml is the only new surface.
+serde = { version = "1", features = ["derive"] }
+toml = { version = "0.8", default-features = false, features = ["parse"] }
+
 [lints.rust]
 unsafe_code = "forbid"
 

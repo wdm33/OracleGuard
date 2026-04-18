@@ -1,0 +1,34 @@
+# OracleGuard node config — sample.
+#
+# Operator-supplied config consumed by the DomainHandler registered
+# with Ziranity substrate dispatch. Loader is
+# `oracleguard_ziranity_handler::build_disbursement_handler(path)`.
+#
+# Every byte-array field is lowercase hex matching the layout of the
+# corresponding canonical type in `oracleguard-schemas`. See the
+# `config` module docstring for the per-field specification.
+
+[anchor]
+# Policy refs the anchor gate accepts. Each entry is 64 hex chars
+# (32 bytes), representing the SHA-256 of canonical policy bytes.
+# The value below is the golden fixture policy_ref in this repo —
+# reproducible via `sha256sum fixtures/policy_v1.canonical.bytes`.
+registered_policy_refs = [
+  "56a7bb9793e40aa54402ce67fcbce17dee93b6713c76ccba6c02c11f749968c2",
+]
+
+# One allocation for the MVP demo: 1_000 ADA, one authorized subject,
+# ADA-denominated, one approved destination. All ids are test
+# sentinels (0x22/0x33/0x55 repeated) matching the fixtures under
+# `fixtures/evidence/`.
+
+[[registry.allocations]]
+id                  = "2222222222222222222222222222222222222222222222222222222222222222"
+basis_lovelace      = 1_000_000_000
+authorized_subjects = [
+  "3333333333333333333333333333333333333333333333333333333333333333",
+]
+approved_asset      = "ADA"
+approved_destinations = [
+  { bytes_hex = "555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555", length = 57 },
+]
