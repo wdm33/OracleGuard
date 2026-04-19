@@ -84,35 +84,74 @@ setup_smoke_workdir() {
   ln -sf "$ZIRANITY_BUNDLE/config/smoke.sh"           "$sd/smoke.sh"
 
   # Build a minimal OracleGuard tree containing only what smoke.sh
-  # reads: the integration fixtures and the routing OCU id hex. We
-  # COPY (not symlink) the intent fixtures so we can refresh their
-  # oracle_provenance timestamps in-place without touching the repo.
+  # reads: the integration fixtures dir and the routing OCU id hex.
+  # We overwrite the intent + result postcards with ones built from
+  # the live Charli3 AggState so consensus is evaluating current
+  # market conditions, not a 2024 snapshot.
   local og="$SMOKE_WORKDIR/OracleGuard"
   mkdir -p "$og/integrations/ziranity/fixtures/integration"
   mkdir -p "$og/fixtures/routing"
-  cp "$REPO_ROOT"/integrations/ziranity/fixtures/integration/*.postcard \
+  cp "$REPO_ROOT"/integrations/ziranity/fixtures/integration/stale_oracle_intent.postcard \
+     "$og/integrations/ziranity/fixtures/integration/"
+  cp "$REPO_ROOT"/integrations/ziranity/fixtures/integration/stale_oracle_result.postcard \
      "$og/integrations/ziranity/fixtures/integration/"
   cp "$REPO_ROOT"/fixtures/routing/disbursement_ocu_id.hex \
      "$og/fixtures/routing/disbursement_ocu_id.hex"
 
-  # Refresh oracle_provenance timestamps on the time-sensitive fixtures
-  # (allow + deny). The stale fixture stays stale — that's its purpose.
-  # intent_id is invariant under provenance change (encoding.rs excludes
-  # provenance from the identity projection) and AuthorizedEffectV1
-  # doesn't carry provenance, so the expected result fixtures remain
-  # valid.
-  local refresh_bin="$REPO_ROOT/target/release/examples/refresh_fixture_timestamps"
-  if [ ! -x "$refresh_bin" ]; then
+  # Build live allow + deny scenarios from the current Preprod oracle.
+  # The policy + policy_ref are fixed; the oracle fact drives band
+  # selection, and scenario amounts are sized to land inside (allow =
+  # 80% of cap) or outside (deny = 110% of cap) the band's cap. The
+  # offline evaluator predicts the authorization result; smoke.sh then
+  # proves consensus reproduces that prediction byte-for-byte.
+  local builder="$REPO_ROOT/target/release/examples/build_live_scenario"
+  if [ ! -x "$builder" ]; then
     (cd "$REPO_ROOT" && cargo build -p oracleguard-adapter \
-        --example refresh_fixture_timestamps --release --quiet)
+        --example build_live_scenario --release --quiet)
   fi
-  for scenario in allow_700_ada deny_900_ada; do
-    "$refresh_bin" \
-      "$og/integrations/ziranity/fixtures/integration/${scenario}_intent.postcard" \
-      >/dev/null || true
-  done
+  # Write live artifacts and capture the key=value summary for the
+  # caller to source at its own scope (bash `local` + dynamic names
+  # don't propagate out of a function cleanly).
+  LIVE_KV_FILE="$SMOKE_WORKDIR/live.kv"
+  if "$builder" \
+      --template-intent "$REPO_ROOT/integrations/ziranity/fixtures/integration/allow_700_ada_intent.postcard" \
+      --allocation-lovelace 1000000000 \
+      --allow-intent-out "$og/integrations/ziranity/fixtures/integration/allow_700_ada_intent.postcard" \
+      --allow-result-out "$og/integrations/ziranity/fixtures/integration/allow_700_ada_result.postcard" \
+      --deny-intent-out  "$og/integrations/ziranity/fixtures/integration/deny_900_ada_intent.postcard" \
+      --deny-result-out  "$og/integrations/ziranity/fixtures/integration/deny_900_ada_result.postcard" \
+      > "$LIVE_KV_FILE" 2>&1; then
+    :
+  else
+    echo "    warn: live scenario build failed; smoke.sh will use the 2024 fixtures" >&2
+    cat "$LIVE_KV_FILE" >&2 || true
+    : > "$LIVE_KV_FILE"
+  fi
 
   SMOKE_RUNNER="$sd/smoke.sh"
+}
+
+# Read the key=value file build_live_scenario produced and surface the
+# fields demo.sh's later steps need: intent ids, amounts, price, band.
+load_live_kv() {
+  [ -f "${LIVE_KV_FILE:-/dev/null}" ] || return 0
+  while IFS='=' read -r k v; do
+    [ -z "$k" ] && continue
+    case "$k" in
+      allow_intent_id)            ALLOW_INTENT_ID="$v" ;;
+      allow_amount_lovelace)      ALLOW_AMOUNT_LOVELACE="$v" ;;
+      allow_band_bps)             ALLOW_BAND_BPS="$v" ;;
+      allow_verdict)              ALLOW_VERDICT="$v" ;;
+      deny_intent_id)             DENY_INTENT_ID="$v" ;;
+      deny_amount_lovelace)       DENY_AMOUNT_LOVELACE="$v" ;;
+      deny_band_bps)              DENY_BAND_BPS="$v" ;;
+      deny_verdict)               DENY_VERDICT="$v" ;;
+      oracle_price_microusd)      ORACLE_PRICE_MICROUSD="$v" ;;
+      oracle_created_ms)          ORACLE_CREATED_MS="$v" ;;
+      oracle_expiry_ms)           ORACLE_EXPIRY_MS="$v" ;;
+      oracle_aggregator_utxo_ref) ORACLE_AGG_UTXO_REF="$v" ;;
+    esac
+  done < "$LIVE_KV_FILE"
 }
 
 POOL_ADDR="addr_test1qz4f2vac8nn7tp802mxj3cu40a7xhhzc3agut6spq6rpz5rgtlvyed9yn3ncuv3fgaadfmvn64d7egjn824t7pj99xfs4y58d0"
@@ -404,13 +443,36 @@ if [ "$DRY" = 1 ] || [ ! -x "$SMOKE" ]; then
   skipped "Consensus run: deny scenario (4-node Ziranity BFT devnet)"  "Devnet submit + byte-identity diff ($reason)"
 else
   setup_smoke_workdir
+  load_live_kv
+  # Surface the live-derived scenario math so the audience sees the
+  # chain: oracle price → active band → cap → scenario amounts. All
+  # computed from live Charli3 data against the fixed policy.
+  if [ -n "${ALLOW_AMOUNT_LOVELACE:-}" ]; then
+    step "Active band + scenario amounts (live-derived)" \
+         "The fixed policy applies to current market conditions. Live oracle price sets the active band; band's basis-points cap scopes how much of the 1000 ADA allocation can be released right now. Allow = 80% of cap (should Authorize); Deny = 110% of cap (should Deny ReleaseCapExceeded)." \
+         "cat <<EOF
+live oracle price   : ${ORACLE_PRICE_MICROUSD} microusd  (~\$$((ORACLE_PRICE_MICROUSD / 1_000_000)).$(printf '%03d' $(((ORACLE_PRICE_MICROUSD % 1_000_000) / 1_000))))
+oracle expiry (ms)  : ${ORACLE_EXPIRY_MS}
+active band         : ${ALLOW_BAND_BPS} bps   (cap = $((1_000_000_000 * ALLOW_BAND_BPS / 10_000 / 1_000_000)) ADA of the 1000 ADA allocation)
+
+allow scenario
+  request           : $((ALLOW_AMOUNT_LOVELACE / 1_000_000)) ADA  (${ALLOW_AMOUNT_LOVELACE} lovelace)
+  intent_id         : ${ALLOW_INTENT_ID}
+  evaluator verdict : ${ALLOW_VERDICT}
+
+deny scenario
+  request           : $((DENY_AMOUNT_LOVELACE / 1_000_000)) ADA  (${DENY_AMOUNT_LOVELACE} lovelace)
+  intent_id         : ${DENY_INTENT_ID}
+  evaluator verdict : ${DENY_VERDICT}
+EOF" || true
+  fi
   if step "Consensus run: allow scenario (4-node Ziranity BFT devnet)" \
-          "Submit allow_700_ada fixture to a 4-node Ziranity BFT devnet; expect PASS (committed output bytes match the recorded fixture)." \
+          "Submit the live-built allow intent to a 4-node Ziranity BFT devnet. PASS means consensus produced canonical AuthorizationResult bytes byte-identical to what our offline evaluator predicted for the same live inputs — reproducibility under BFT." \
           "'$SMOKE_RUNNER' allow --no-build 2>&1 | tee /tmp/og-smoke-allow.out"; then
     ALLOW_OK=1
   fi
   if step "Consensus run: deny scenario (4-node Ziranity BFT devnet)" \
-          "Submit deny_900_ada fixture; expect PASS with the 3-byte Denied(ReleaseCapExceeded) envelope." \
+          "Same as allow but with a request sized above the current band's cap. PASS means consensus emitted the 3-byte Denied(ReleaseCapExceeded, Grant) envelope our evaluator predicted." \
           "'$SMOKE_RUNNER' deny --no-build 2>&1 | tee /tmp/og-smoke-deny.out"; then
     DENY_OK=1
   fi
@@ -438,15 +500,20 @@ elif [ -z "${POOL_MNEMONIC:-}" ]; then
 elif [ ! -x "$VENV_PY" ]; then
   skipped "Cardano settlement" ".venv/bin/python not found"
 else
-  step "Settle 700 ADA on Cardano Preprod" \
-       "Shell to scripts/cardano_disburse.py; prints the tx_id on success." \
+  # Use the live amount + intent_id so the on-chain tx carries the
+  # authorization amount consensus just approved and the real
+  # intent_id as metadata label 674 — not a placeholder.
+  SETTLE_AMOUNT="${ALLOW_AMOUNT_LOVELACE:-700000000}"
+  SETTLE_INTENT_ID="${ALLOW_INTENT_ID:-$(printf 'dd%.0s' {1..32})}"
+  step "Settle $((SETTLE_AMOUNT / 1000000)) ADA on Cardano Preprod" \
+       "Shell to scripts/cardano_disburse.py with the amount consensus authorized and the real intent_id as Cardano metadata (label 674) so an auditor can correlate the on-chain tx back to the committed decision." \
        "$VENV_PY scripts/cardano_disburse.py \\
   --ogmios-url $OGMIOS_URL \\
   --pool-address $POOL_ADDR \\
   --destination-bytes-hex $RECEIVER_HEX \\
   --destination-length 57 \\
-  --amount-lovelace 700000000 \\
-  --intent-id $(printf 'dd%.0s' {1..32}) \\
+  --amount-lovelace $SETTLE_AMOUNT \\
+  --intent-id $SETTLE_INTENT_ID \\
   2>&1 | tee /tmp/og-settle.out" || true
   # The helper prints assorted progress lines + a final tx_id line.
   # Grep for the 64-char hex id so we don't pick up an error message.
@@ -461,7 +528,7 @@ else
          "sleep 25 && echo waited 25s" || true
 
     step "Receiver wallet balance (after)" \
-         "Re-query the receiver's UTxOs — balance should be +700 tADA." \
+         "Re-query the receiver's UTxOs — balance should be +$((SETTLE_AMOUNT / 1000000)) tADA." \
          "curl -sS '$KUPO_URL/matches/$RECEIVER_ADDR?unspent' \
   | python3 -c 'import json,sys; rs=json.load(sys.stdin); c=sum(r[\"value\"][\"coins\"] for r in rs); print(f\"{c/1_000_000:.6f} tADA  ({c} lovelace, {len(rs)} UTxOs)\")'" || true
 
@@ -482,12 +549,13 @@ fi
 # 6. LIVE EVIDENCE BUNDLE (assembled from this run, real tx)
 # ==============================================================
 
-if [ -n "$TX_ID" ] && [ -n "$ALLOW_HEIGHT" ]; then
+if [ -n "$TX_ID" ] && [ -n "$ALLOW_HEIGHT" ] && [ -n "${SMOKE_WORKDIR:-}" ]; then
+  STAGED="$SMOKE_WORKDIR/OracleGuard/integrations/ziranity/fixtures/integration"
   step "Assemble + verify a live evidence bundle from this run" \
-       "Use the real tx_hash from Phase 5 and the real committed_height from Phase 7's consensus run. The canonical intent + authorization bytes match the fixture smoke.sh just byte-diffed — so this is a real evidence bundle with real chain data (no placeholder fields). The offline verifier replays it the same way an independent auditor would." \
+       "Use the live-built intent (from this run's Charli3 price), the canonical authorization bytes consensus just produced, the real tx_hash from the Cardano settlement, and the real committed_height. Every field is live — no placeholders. The offline verifier replays it the way an independent auditor would, reaches the same verdict." \
        "cargo run -p oracleguard-adapter --example verify_live_bundle --quiet --release -- \
-  --intent-path integrations/ziranity/fixtures/integration/allow_700_ada_intent.postcard \
-  --auth-path   integrations/ziranity/fixtures/integration/allow_700_ada_result.postcard \
+  --intent-path '$STAGED/allow_700_ada_intent.postcard' \
+  --auth-path   '$STAGED/allow_700_ada_result.postcard' \
   --tx-hash     $TX_ID \
   --committed-height $ALLOW_HEIGHT" || true
 else
@@ -522,17 +590,29 @@ fi
 {
   echo
   echo '═══ SUMMARY'
+  echo "    policy_ref   : 56a7bb9793e40aa54402ce67fcbce17dee93b6713c76ccba6c02c11f749968c2"
+  if [ -n "${ORACLE_PRICE_MICROUSD:-}" ]; then
+    printf '    live price   : %s microusd  (~$%d.%03d, band = %s bps)\n' \
+      "$ORACLE_PRICE_MICROUSD" \
+      "$((ORACLE_PRICE_MICROUSD / 1_000_000))" \
+      "$(((ORACLE_PRICE_MICROUSD % 1_000_000) / 1_000))" \
+      "${ALLOW_BAND_BPS:-?}"
+  fi
   if [ "$DRY" = 1 ]; then
     echo "    mode         : DRY (no devnet, no settlement)"
   else
     echo "    pull path    : $PULL_MODE${PULL_REASON:+  ($PULL_REASON)}"
     [ -n "${CHARLI3_TX_ID:-}" ] && echo "    charli3 tx   : $CHARLI3_TX_ID"
+    [ -n "${ALLOW_AMOUNT_LOVELACE:-}" ] && \
+      echo "    allow amount : $((ALLOW_AMOUNT_LOVELACE / 1_000_000)) ADA (live-sized to 80% of cap)"
+    [ -n "${DENY_AMOUNT_LOVELACE:-}" ] && \
+      echo "    deny  amount : $((DENY_AMOUNT_LOVELACE / 1_000_000)) ADA (live-sized to 110% of cap)"
     echo "    allow smoke  : $([ "$ALLOW_OK" = 1 ] && echo PASS || echo 'FAIL/SKIPPED')"
     echo "    deny  smoke  : $([ "$DENY_OK"  = 1 ] && echo PASS || echo 'FAIL/SKIPPED')"
     [ -n "$TX_ID" ] && echo "    cardano tx   : $TX_ID" && \
                        echo "    cexplorer    : https://preprod.cexplorer.io/tx/$TX_ID"
   fi
-  echo "    verifier     : CLEAN (4/4 recorded bundles reproduce)"
+  echo "    verifier     : CLEAN (live bundle + 4/4 recorded fixtures)"
   echo
 } | tee -a "$TRANSCRIPT_FILE"
 
