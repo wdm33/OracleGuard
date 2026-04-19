@@ -476,12 +476,12 @@ deny scenario
 BANDMATH" || true
   fi
   if step "Consensus run: allow scenario (4-node Ziranity BFT devnet)" \
-          "Submit the live-built allow intent to a 4-node Ziranity BFT devnet. PASS means consensus produced canonical AuthorizationResult bytes byte-identical to what our offline evaluator predicted for the same live inputs — reproducibility under BFT." \
+          "Each validator runs OracleGuard's three-gate closure (anchor → registry → grant) inside its own execution path, not client-side, so BFT agreement is agreement on the decision itself. Wall-clock is consensus-committed (WCA_01 — leader's proposed_at_ms under QC), so the freshness check can't be manipulated by the submitter. PASS means all four validators reached byte-identical agreement on the canonical AuthorizationResult, reproducing what our offline evaluator predicted for these live inputs." \
           "'$SMOKE_RUNNER' allow --no-build 2>&1 | tee /tmp/og-smoke-allow.out"; then
     ALLOW_OK=1
   fi
   if step "Consensus run: deny scenario (4-node Ziranity BFT devnet)" \
-          "Same as allow but with a request sized above the current band's cap. PASS means consensus emitted the 3-byte Denied(ReleaseCapExceeded, Grant) envelope our evaluator predicted." \
+          "Same three-gate mechanism, but the request is sized above the current band's cap. The grant gate emits Denied(ReleaseCapExceeded, Grant); PASS confirms every validator committed to the same 3-byte envelope the offline evaluator predicted. Governance is enforced at the consensus layer — the network itself refuses the over-cap disbursement." \
           "'$SMOKE_RUNNER' deny --no-build 2>&1 | tee /tmp/og-smoke-deny.out"; then
     DENY_OK=1
   fi
