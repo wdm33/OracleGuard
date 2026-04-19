@@ -369,7 +369,6 @@ dependencies = [
  "minicbor",
  "oracleguard-policy",
  "oracleguard-schemas",
- "oracleguard-verifier",
  "postcard",
  "serde",
  "serde_json",

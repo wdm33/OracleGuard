@@ -22,7 +22,6 @@ serde_json = "1"
 
 [dev-dependencies]
 postcard = { version = "=1.1.1", default-features = false, features = ["alloc"] }
-oracleguard-verifier = { path = "../oracleguard-verifier" }
 
 [lints]
 workspace = true
