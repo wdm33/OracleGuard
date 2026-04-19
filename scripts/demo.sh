@@ -45,7 +45,10 @@
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Resolve to an absolute path before any cd so --help and other
+# self-reading logic works regardless of where the user invoked from.
+SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+REPO_ROOT="$(cd "$(dirname "$SCRIPT_PATH")/.." && pwd)"
 cd "$REPO_ROOT"
 
 SMOKE="$HOME/.local/opt/ziranity-v1.1.0-oracleguard-linux-x86_64/config/smoke.sh"
@@ -68,14 +71,14 @@ for a in "$@"; do
     --dry)            DRY=1 ;;
     --rotate)         ROTATE=1 ;;
     --help|-h)
-      # Print the banner comment (everything between line 2 and the
-      # first blank-then-`set` line) with the leading "# " stripped.
+      # Print the banner comment (everything from line 2 up to the
+      # first `set -` line) with the leading "# " stripped.
       awk '
         NR==1          { next }
         /^set -/       { exit }
         /^#/           { sub(/^# ?/, ""); print; next }
         /^[[:space:]]*$/ { print; next }
-      ' "$0"
+      ' "$SCRIPT_PATH"
       exit 0 ;;
     *) echo "unknown flag: $a" >&2; exit 2 ;;
   esac
