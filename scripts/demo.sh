@@ -35,6 +35,7 @@
 #
 # FLAGS
 #   -i, --interactive   pause for ENTER before/after each step
+#   --intro             print a scope banner at start (in/out of scope)
 #   --dry               skip phase 4 (consensus) + phase 5 (settle)
 #   --rotate            add phase 7 (policy rotation)
 #   -h, --help          print this help and exit
@@ -167,11 +168,13 @@ KUPO_URL="http://35.209.192.203:1442"
 INTERACTIVE=0
 DRY=0
 ROTATE=0
+INTRO=0
 for a in "$@"; do
   case "$a" in
     -i|--interactive) INTERACTIVE=1 ;;
     --dry)            DRY=1 ;;
     --rotate)         ROTATE=1 ;;
+    --intro)          INTRO=1 ;;
     --help|-h)
       # Print the banner comment (everything from line 2 up to the
       # first `set -` line) with the leading "# " stripped.
@@ -233,6 +236,31 @@ skipped() {
     printf '    %s\n' "$2"
   } | tee -a "$TRANSCRIPT_FILE"
 }
+
+# ==============================================================
+# INTRO — scope banner (opt-in via --intro; prints once, not a step)
+# ==============================================================
+
+if [ "$INTRO" = 1 ]; then
+  {
+    echo
+    echo "════════════════════════════════════════════════════════════════════"
+    echo " OracleGuard × KZS — governed disbursement demo"
+    echo "════════════════════════════════════════════════════════════════════"
+    echo " In scope     : live Charli3 pull  →  4-node Ziranity BFT consensus"
+    echo "                →  Cardano Preprod settlement  →  offline verification"
+    echo
+    echo " Out of scope : on-chain Katiba anchoring  ·  Shadowbox registered"
+    echo "                bundles  ·  multi-asset (ADA only)  ·  multi-authority"
+    echo "                routing (single disbursement OCU)"
+    echo
+    echo " Scope notes  : fresh 4-node devnet per scenario (height=1 by design);"
+    echo "                policy + policy_ref are fixed; oracle + decisions are live;"
+    echo "                fixture addresses/amounts are reproducibility anchors,"
+    echo "                not production values"
+    echo "════════════════════════════════════════════════════════════════════"
+  } | tee -a "$TRANSCRIPT_FILE"
+fi
 
 # ==============================================================
 # 0. SESSION SETUP (mnemonic status)
