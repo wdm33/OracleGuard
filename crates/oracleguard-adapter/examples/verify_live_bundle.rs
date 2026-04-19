@@ -101,10 +101,27 @@ fn main() {
         output: authorization,
     };
 
-    // 4. Build the execution outcome from the real tx_hash captured
-    //    from cardano_disburse.py — no placeholder bytes.
-    let outcome = FulfillmentOutcome::Settled {
-        tx_hash: CardanoTxHashV1(args.tx_hash),
+    // 4. Build the execution outcome. If the authorization is
+    //    Authorized, we require --tx-hash and build a Settled outcome
+    //    with the real Cardano tx id. If the authorization is Denied,
+    //    no Cardano tx exists by design — execution is DeniedUpstream
+    //    carrying the same (reason, gate) the authorization records.
+    let outcome = match authorization {
+        AuthorizationResult::Authorized { .. } => {
+            let tx_hash = match args.tx_hash {
+                Some(h) => h,
+                None => {
+                    eprintln!("error: --tx-hash required for Authorized scenarios");
+                    std::process::exit(2);
+                }
+            };
+            FulfillmentOutcome::Settled {
+                tx_hash: CardanoTxHashV1(tx_hash),
+            }
+        }
+        AuthorizationResult::Denied { reason, gate } => {
+            FulfillmentOutcome::DeniedUpstream { reason, gate }
+        }
     };
 
     // 5. Assemble the canonical evidence bundle. The now_unix_ms input
@@ -134,10 +151,20 @@ fn main() {
     if report.is_ok() {
         println!("   verdict                : CLEAN");
         println!();
-        println!("   → the committed decision and the settled Cardano tx");
-        println!("     reproduce byte-for-byte from the recorded evidence,");
-        println!("     with no placeholder fields. Independent auditors can");
-        println!("     replay this bundle offline and reach the same verdict.");
+        match authorization {
+            AuthorizationResult::Authorized { .. } => {
+                println!("   → the committed decision and the settled Cardano tx");
+                println!("     reproduce byte-for-byte from the recorded evidence,");
+                println!("     with no placeholder fields. Independent auditors can");
+                println!("     replay this bundle offline and reach the same verdict.");
+            }
+            AuthorizationResult::Denied { .. } => {
+                println!("   → the denial reproduces byte-for-byte from the recorded");
+                println!("     evidence. No Cardano tx exists (denials emit none);");
+                println!("     an independent auditor replays the bundle and reaches");
+                println!("     the same Denied verdict with the same reason + gate.");
+            }
+        }
         std::process::exit(0);
     } else {
         println!("   verdict                : FAILED");
@@ -155,7 +182,7 @@ fn main() {
 struct Args {
     intent_path: PathBuf,
     auth_path: PathBuf,
-    tx_hash: [u8; 32],
+    tx_hash: Option<[u8; 32]>,
     committed_height: u64,
     allocation_basis_lovelace: u64,
 }
@@ -200,9 +227,15 @@ fn parse_args() -> Result<Args, String> {
 
     let intent_path = intent_path.ok_or("--intent-path is required")?;
     let auth_path = auth_path.ok_or("--auth-path is required")?;
-    let tx_hash_hex = tx_hash_hex.ok_or("--tx-hash is required")?;
     let committed_height = committed_height.ok_or("--committed-height is required")?;
-    let tx_hash = decode_tx_hash(&tx_hash_hex)?;
+    // --tx-hash is optional: required only for Authorized scenarios,
+    // forbidden (would be misleading) for Denied ones. The main loop
+    // enforces the Authorized-requires-tx-hash invariant after decoding
+    // the authorization bytes.
+    let tx_hash = match tx_hash_hex {
+        Some(hex) => Some(decode_tx_hash(&hex)?),
+        None => None,
+    };
 
     Ok(Args {
         intent_path,

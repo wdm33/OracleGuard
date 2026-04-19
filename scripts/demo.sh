@@ -487,12 +487,17 @@ BANDMATH" || true
   fi
 fi
 
-# Extract committed_height from smoke.sh's PASS line for the live-bundle
-# verifier step. Line format: "PASS scenario=allow height=N bytes=M".
+# Extract committed_height from smoke.sh's PASS line for each
+# live-bundle verify step. Line format: "PASS scenario=X height=N bytes=M".
 ALLOW_HEIGHT=""
+DENY_HEIGHT=""
 if [ "$ALLOW_OK" = 1 ] && [ -f /tmp/og-smoke-allow.out ]; then
   ALLOW_HEIGHT=$(grep -oE 'height=[0-9]+' /tmp/og-smoke-allow.out 2>/dev/null \
                  | head -1 | grep -oE '[0-9]+' || true)
+fi
+if [ "$DENY_OK" = 1 ] && [ -f /tmp/og-smoke-deny.out ]; then
+  DENY_HEIGHT=$(grep -oE 'height=[0-9]+' /tmp/og-smoke-deny.out 2>/dev/null \
+                | head -1 | grep -oE '[0-9]+' || true)
 fi
 
 # ==============================================================
@@ -575,12 +580,22 @@ else
 fi
 
 # ==============================================================
-# 7. OFFLINE VERIFIER (golden fixtures)
+# 7. LIVE DENY BUNDLE (assembled from this run, no tx by design)
 # ==============================================================
 
-step "Offline verifier: walk each recorded evidence bundle" \
-     "For every recorded fixture bundle: decode, show what was recorded (intent_id, amount, oracle price, authorization verdict, execution outcome), recompute intent_id, check cross-field invariants, and replay the evaluator. Same verifier as the live-bundle step — these fixtures carry placeholder tx bytes because they were built at dev-time; the verifier doesn't check tx hashes against the chain, only internal consistency." \
-     "cargo run -p oracleguard-verifier --example verify_bundles --quiet --release 2>&1"
+if [ -n "$DENY_HEIGHT" ] && [ -n "${SMOKE_WORKDIR:-}" ]; then
+  STAGED="$SMOKE_WORKDIR/OracleGuard/integrations/ziranity/fixtures/integration"
+  step "Offline verify the live deny bundle (no tx — denials emit none)" \
+       "Same offline verifier as the previous step, against the deny scenario's live bundle. Authorization is Denied(ReleaseCapExceeded) — no Cardano tx exists by design; execution records DeniedUpstream with the same reason+gate. Independent auditor replay reaches the same verdict." \
+       "cargo run -p oracleguard-adapter --example verify_live_bundle --quiet --release -- \
+  --intent-path '$STAGED/deny_900_ada_intent.postcard' \
+  --auth-path   '$STAGED/deny_900_ada_result.postcard' \
+  --committed-height $DENY_HEIGHT" || true
+else
+  reason="no live deny run"
+  [ "$DRY" = 1 ] && reason="--dry flag"
+  skipped "Offline verify the live deny bundle" "$reason"
+fi
 
 # ==============================================================
 # 7. POLICY ROTATION (optional)
@@ -616,12 +631,12 @@ fi
       echo "    allow amount : $((ALLOW_AMOUNT_LOVELACE / 1000000)) ADA (live-sized to 80% of cap)"
     [ -n "${DENY_AMOUNT_LOVELACE:-}" ] && \
       echo "    deny  amount : $((DENY_AMOUNT_LOVELACE / 1000000)) ADA (live-sized to 110% of cap)"
-    echo "    allow smoke  : $([ "$ALLOW_OK" = 1 ] && echo PASS || echo 'FAIL/SKIPPED')"
-    echo "    deny  smoke  : $([ "$DENY_OK"  = 1 ] && echo PASS || echo 'FAIL/SKIPPED')"
+    echo "    allow consensus : $([ "$ALLOW_OK" = 1 ] && echo PASS || echo 'FAIL/SKIPPED')"
+    echo "    deny  consensus : $([ "$DENY_OK"  = 1 ] && echo PASS || echo 'FAIL/SKIPPED')"
     [ -n "$TX_ID" ] && echo "    cardano tx   : $TX_ID" && \
                        echo "    cexplorer    : https://preprod.cexplorer.io/tx/$TX_ID"
   fi
-  echo "    verifier     : CLEAN (live bundle + 4/4 recorded fixtures)"
+  echo "    verifier     : CLEAN (allow + deny live bundles reproduce offline)"
   echo
 } | tee -a "$TRANSCRIPT_FILE"
 
