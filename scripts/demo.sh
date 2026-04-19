@@ -436,21 +436,28 @@ PULL_MODE=$(sed -n '1p' "$PULL_STATE" 2>/dev/null || echo "fallback")
 PULL_REASON=$(sed -n '2p' "$PULL_STATE" 2>/dev/null || echo "readiness check did not complete")
 [ -z "$PULL_MODE" ] && PULL_MODE="fallback"
 
-# Presenter choice: ENTER = attempt live pull; 2 = fallback explicitly.
-# In non-interactive mode, follow whatever the readiness check decided.
+# Path selection rules:
+#   --dry                      → always fallback
+#   readiness FAILED           → always fallback (no point attempting
+#                                a pull we already know will fail;
+#                                skip straight to reading the current
+#                                on-chain AggState)
+#   readiness PASSED + interactive → presenter confirms with ENTER,
+#                                can still force fallback with [2]
+#   readiness PASSED + non-interactive → proceed live automatically
 if [ "$DRY" = 1 ]; then
   PULL_MODE="fallback"
   PULL_REASON="--dry flag"
+elif [ "$PULL_MODE" = "fallback" ]; then
+  # Readiness already wrote "fallback" + its reason to PULL_STATE;
+  # PULL_REASON is already populated. Nothing to prompt — go straight
+  # to the fallback step.
+  :
 elif [ "$INTERACTIVE" = 1 ]; then
   echo
   echo "    ═══ CHOOSE PATH ═══"
-  if [ "$PULL_MODE" = "live" ]; then
-    echo "    [ENTER]  run the live Charli3 aggregation now  (recommended)"
-    echo "    [2]      skip aggregation and use the existing on-chain AggState"
-  else
-    echo "    [ENTER]  attempt the live pull anyway  (readiness check failed)"
-    echo "    [2]      skip aggregation and disclose as fallback  (recommended)"
-  fi
+  echo "    [ENTER]  run the live Charli3 aggregation now  (recommended)"
+  echo "    [2]      skip aggregation and use the existing on-chain AggState"
   read -r -p "    > " _choice < /dev/tty
   case "$_choice" in
     2) PULL_MODE="fallback"; PULL_REASON="presenter selected fallback" ;;
