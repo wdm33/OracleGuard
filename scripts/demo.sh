@@ -437,9 +437,19 @@ if [ "$PULL_MODE" = "live" ]; then
   CHARLI3_TX_ID=$(grep -oE 'tx[_ ]?id[: ]+[0-9a-f]{64}' /tmp/og-charli3-aggregate.out 2>/dev/null \
                   | head -1 | grep -oE '[0-9a-f]{64}' || true)
 
-  step "Charli3 pull: wait for Preprod confirmation (~40 s)" \
-       "Rollback-safe depth is 2+ blocks. We wait 45 s for the aggregation tx to land before reading the UTxO." \
-       "sleep 45 && echo 'waited 45s'" || true
+  # Only wait for confirmation if the aggregation actually submitted +
+  # confirmed. If it errored (validity-interval, script rejection,
+  # oracle-node disagreement, etc.) there's nothing landing — skip the
+  # 45 s sleep and go straight to the AggState fetch, which reads
+  # whatever is already on chain from the last successful aggregator.
+  if grep -q "Transaction confirmed on blockchain" /tmp/og-charli3-aggregate.out 2>/dev/null; then
+    step "Charli3 pull: wait for Preprod confirmation (~40 s)" \
+         "Rollback-safe depth is 2+ blocks. We wait 45 s for our aggregation tx to land before reading the UTxO." \
+         "sleep 45 && echo 'waited 45s'" || true
+  else
+    skipped "Charli3 pull: wait for Preprod confirmation" \
+            "our aggregation did not confirm — nothing to wait for; the next step reads the AggState already on chain from the last successful aggregator"
+  fi
 else
   step "Charli3 pull: FALLBACK — live aggregation skipped" \
        "Live pull is not available ($PULL_REASON). What follows is an honest disclosure of what the rest of the demo is and isn't." \
