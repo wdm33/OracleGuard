@@ -8,18 +8,26 @@
 #
 # PHASES (each may produce several numbered steps):
 #
-#   0. session  — show POOL_MNEMONIC load status (never the value)
+#   0. session  — show POOL_MNEMONIC + WALLET_MNEMONIC load status
+#                 (never the values)
 #   1. policy   — show the policy JSON; derive policy_ref
 #   2. balances — query live Kupo for pool + receiver balances
-#   3. oracle   — fetch the Charli3 AggState UTxO via Kupo
-#   4. consensus— run allow + deny scenarios against a 4-node
+#   3. pull     — sanity-check Charli3 pull-oracle connectivity, then
+#                 run `charli3 aggregate --auto-submit` to pull a
+#                 fresh ADA/USD feed on-chain. Falls back with an
+#                 explicit REAL / NOT REAL disclosure if any probe
+#                 fails or the presenter selects option 2.
+#   4. oracle   — fetch the Charli3 AggState UTxO via Kupo (the one
+#                 the pull just produced, or the existing one if the
+#                 pull was skipped)
+#   5. consensus— run allow + deny scenarios against a 4-node
 #                 Ziranity BFT devnet (underlying driver: smoke.sh)
-#   5. settle   — if allow passed, submit a real Cardano Preprod
+#   6. settle   — if allow passed, submit a real Cardano Preprod
 #                 disbursement via scripts/cardano_disburse.py, then
 #                 re-query the receiver's balance
-#   6. verify   — replay recorded evidence bundles through the
+#   7. verify   — replay recorded evidence bundles through the
 #                 offline verifier
-#   7. rotate   — (optional) show that raising the cap produces a
+#   8. rotate   — (optional) show that raising the cap produces a
 #                 new policy_ref
 #
 # USAGE
@@ -40,7 +48,10 @@
 # PREREQ (for live mode; --dry works without any of these)
 #   - ~/.local/opt/ziranity-v1.1.0-oracleguard-linux-x86_64/config/smoke.sh
 #   - .venv/bin/python with pycardano      (see scripts/preflight.sh)
+#   - .venv/bin/charli3                    (for the pull phase)
+#   - deploy/preprod/ada-usd-preprod.example.yml
 #   - POOL_MNEMONIC exported               (for the settlement phase)
+#   - WALLET_MNEMONIC exported             (for the Charli3 pull phase)
 #   - Hackathon Ogmios + Kupo reachable at 35.209.192.203:1337 / :1442
 
 set -euo pipefail
@@ -126,8 +137,11 @@ skipped() {
 # ==============================================================
 
 step "Session setup (done off-screen before the demo)" \
-     "Pool signing key was loaded into this shell's environment from Eternl via \`read -s -p POOL_MNEMONIC:\` — the mnemonic never touches disk and never appears in history." \
-     '[ -n "${POOL_MNEMONIC:-}" ] && echo "POOL_MNEMONIC: loaded ($(echo "$POOL_MNEMONIC" | wc -w) words)" || echo "POOL_MNEMONIC: not set (dry-run ok, settlement will skip)"'
+     "Signing keys were loaded into this shell's environment from Eternl via \`read -s -p\` — the mnemonics never touch disk and never appear in history." \
+     'for name in POOL_MNEMONIC WALLET_MNEMONIC; do
+  val="${!name:-}"
+  [ -n "$val" ] && echo "$name: loaded ($(echo "$val" | wc -w) words)" || echo "$name: not set"
+done'
 
 # ==============================================================
 # 1. POLICY
@@ -160,11 +174,145 @@ step "Receiver wallet balance (before)" \
   | python3 -c 'import json,sys; rs=json.load(sys.stdin); c=sum(r[\"value\"][\"coins\"] for r in rs); print(f\"{c/1_000_000:.6f} tADA  ({c} lovelace, {len(rs)} UTxOs)\")'"
 
 # ==============================================================
-# 3. ORACLE (live fetch, narrative)
+# 3. CHARLI3 PULL (sanity check → aggregate → narrate)
 # ==============================================================
 
+# step() runs commands in a subshell (pipe to sed), so functions it
+# calls cannot set shell globals directly. The readiness check writes
+# its verdict to this state file, which the main flow reads back.
+PULL_STATE=$(mktemp)
+trap 'rm -f "$PULL_STATE" /tmp/og-charli3-aggregate.out /tmp/og-settle.out' EXIT
+
+run_pull_readiness() {
+  local fails=0
+
+  probe() {
+    local label="$1"; local ok="$2"; local detail="$3"
+    if [ "$ok" = 1 ]; then
+      printf '  [OK]   %-22s %s\n' "$label" "$detail"
+    else
+      printf '  [FAIL] %-22s %s\n' "$label" "$detail"
+      fails=$((fails+1))
+    fi
+  }
+
+  local wallet_words=0
+  [ -n "${WALLET_MNEMONIC:-}" ] && wallet_words=$(echo "$WALLET_MNEMONIC" | wc -w)
+  if [ "$wallet_words" = 24 ]; then
+    probe "WALLET_MNEMONIC"  1 "($wallet_words words loaded)"
+  else
+    probe "WALLET_MNEMONIC"  0 "(not set; pull cannot sign)"
+  fi
+
+  if [ -x "$REPO_ROOT/.venv/bin/charli3" ]; then
+    probe "charli3 binary"   1 "(.venv/bin/charli3)"
+  else
+    probe "charli3 binary"   0 "(missing; run scripts/preflight.sh)"
+  fi
+
+  if [ -f "$REPO_ROOT/deploy/preprod/ada-usd-preprod.example.yml" ]; then
+    probe "charli3 config"   1 "(deploy/preprod/ada-usd-preprod.example.yml)"
+  else
+    probe "charli3 config"   0 "(missing config file)"
+  fi
+
+  if curl -sSfL --max-time 5 "$OGMIOS_URL/health" >/dev/null 2>&1; then
+    probe "Ogmios"           1 "($OGMIOS_URL reachable)"
+  else
+    probe "Ogmios"           0 "($OGMIOS_URL unreachable)"
+  fi
+
+  if curl -sSfL --max-time 5 "$KUPO_URL/health" >/dev/null 2>&1; then
+    probe "Kupo"             1 "($KUPO_URL reachable)"
+  else
+    probe "Kupo"             0 "($KUPO_URL unreachable)"
+  fi
+
+  if [ "$fails" = 0 ]; then
+    echo "  → all probes passed"
+    printf 'live\n\n' > "$PULL_STATE"
+  else
+    echo "  → $fails probe(s) failed"
+    printf 'fallback\n%s readiness probe(s) failed\n' "$fails" > "$PULL_STATE"
+  fi
+  return 0
+}
+
+step "Charli3 pull: readiness check" \
+     "Sanity-check everything the on-demand pull needs (key, binary, config, Ogmios, Kupo) before we attempt the aggregation tx." \
+     "run_pull_readiness"
+
+# Read the verdict the readiness check wrote to the state file.
+PULL_MODE=$(sed -n '1p' "$PULL_STATE" 2>/dev/null || echo "fallback")
+PULL_REASON=$(sed -n '2p' "$PULL_STATE" 2>/dev/null || echo "readiness check did not complete")
+[ -z "$PULL_MODE" ] && PULL_MODE="fallback"
+
+# Presenter choice: ENTER = attempt live pull; 2 = fallback explicitly.
+# In non-interactive mode, follow whatever the readiness check decided.
+if [ "$DRY" = 1 ]; then
+  PULL_MODE="fallback"
+  PULL_REASON="--dry flag"
+elif [ "$INTERACTIVE" = 1 ]; then
+  echo
+  echo "    ═══ CHOOSE PATH ═══"
+  if [ "$PULL_MODE" = "live" ]; then
+    echo "    [ENTER]  run the live Charli3 aggregation now  (recommended)"
+    echo "    [2]      skip aggregation and use the existing on-chain AggState"
+  else
+    echo "    [ENTER]  attempt the live pull anyway  (readiness check failed)"
+    echo "    [2]      skip aggregation and disclose as fallback  (recommended)"
+  fi
+  read -r -p "    > " _choice < /dev/tty
+  case "$_choice" in
+    2) PULL_MODE="fallback"; PULL_REASON="presenter selected fallback" ;;
+    *) PULL_MODE="live"; PULL_REASON="" ;;
+  esac
+fi
+
+if [ "$PULL_MODE" = "live" ]; then
+  CHARLI3_TX_ID=""
+  step "Charli3 pull: submit aggregation tx (live)" \
+       "On-demand pull: the consumer (us) triggers a fresh aggregation. Oracle nodes sign the price, the aggregator collects + submits the tx." \
+       "timeout 120 $REPO_ROOT/.venv/bin/charli3 aggregate --config deploy/preprod/ada-usd-preprod.example.yml --auto-submit 2>&1 | tee /tmp/og-charli3-aggregate.out | tail -12"
+
+  CHARLI3_TX_ID=$(grep -oE 'tx[_ ]?id[: ]+[0-9a-f]{64}' /tmp/og-charli3-aggregate.out 2>/dev/null \
+                  | head -1 | grep -oE '[0-9a-f]{64}' || true)
+
+  step "Charli3 pull: wait for Preprod confirmation (~40 s)" \
+       "Rollback-safe depth is 2+ blocks. We wait 45 s for the aggregation tx to land before reading the UTxO." \
+       "sleep 45 && echo 'waited 45s'"
+else
+  step "Charli3 pull: FALLBACK — live aggregation skipped" \
+       "Live pull is not available ($PULL_REASON). What follows is an honest disclosure of what the rest of the demo is and isn't." \
+       "cat <<'EOF'
+FALLBACK MODE — disclosure
+
+  REAL (in this run):
+    - the AggState UTxO on Preprod Charli3 (we read it below)
+    - its datum: price, created_at_ms, expiry_ms
+    - OracleGuard's canonical parse of those bytes
+    - every downstream step (consensus, settlement, verifier)
+
+  NOT REAL (in this run):
+    - we did not submit the Charli3 aggregation tx ourselves
+    - the on-chain aggregation was produced by another aggregator
+      in the Charli3 network; in production an on-demand consumer
+      would pull it themselves
+
+  Why: $PULL_REASON
+EOF"
+fi
+
+# ==============================================================
+# 4. ORACLE (fetch the AggState)
+# ==============================================================
+
+_fetch_desc="Locate the oracle UTxO holding the C3AS token (ADA/USD feed)."
+if [ "$PULL_MODE" = "live" ]; then
+  _fetch_desc="$_fetch_desc Should match the aggregation tx we just submitted."
+fi
 step "Fetch the Charli3 AggState UTxO" \
-     "Locate the oracle UTxO holding the C3AS token (ADA/USD feed)." \
+     "$_fetch_desc" \
      "curl -sS '$KUPO_URL/matches/$ORACLE_ADDR?unspent' \
   | python3 -c 'import json,sys;
 for r in json.load(sys.stdin):
