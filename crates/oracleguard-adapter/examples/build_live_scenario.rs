@@ -42,11 +42,12 @@ use std::path::PathBuf;
 
 use oracleguard_adapter::charli3::normalize_aggstate_datum;
 use oracleguard_adapter::kupo::{
-    fetch_aggstate_datum, KupoEndpoint, CHARLI3_ADA_USD_ASSET_KEY,
-    CHARLI3_ADA_USD_ORACLE_ADDRESS, DEFAULT_TIMEOUT,
+    fetch_aggstate_datum, KupoEndpoint, CHARLI3_ADA_USD_ASSET_KEY, CHARLI3_ADA_USD_ORACLE_ADDRESS,
+    DEFAULT_TIMEOUT,
 };
 use oracleguard_policy::authorize::AuthorizationResult;
 use oracleguard_policy::evaluate::evaluate_disbursement;
+use oracleguard_policy::math::{compute_max_releasable_lovelace, select_release_band_bps};
 use oracleguard_policy::EvaluationResult;
 use oracleguard_schemas::effect::AuthorizedEffectV1;
 use oracleguard_schemas::encoding::{decode_intent, encode_intent, intent_id};
@@ -136,8 +137,12 @@ fn main() {
         }
     };
 
-    // 3. Build both scenarios from the same live oracle fact.
-    let cap = cap_for_price(args.allocation_lovelace, eval_fact.price_microusd);
+    // 3. Build both scenarios from the same live oracle fact. Cap +
+    //    band math is delegated to the authoritative policy crate so
+    //    this helper cannot drift from consensus semantics.
+    let band_bps = select_release_band_bps(eval_fact.price_microusd);
+    let cap =
+        compute_max_releasable_lovelace(args.allocation_lovelace, band_bps).unwrap_or(u64::MAX);
 
     let allow = build(
         Scenario::Allow,
@@ -163,6 +168,8 @@ fn main() {
     write(&args.deny_result_out, &deny.result_bytes);
 
     // 5. Print structured output for demo.sh to source.
+    println!("live_cap_lovelace={}", cap);
+    println!("live_band_bps={}", band_bps);
     println!("allow_intent_id={}", hex32(&allow.intent_id));
     println!("allow_amount_lovelace={}", allow.amount);
     println!("allow_band_bps={}", allow.band_bps);
@@ -245,8 +252,9 @@ fn build(
                 gate: AuthorizationGate::Grant,
             },
             // band_bps still meaningful: it's what the current price band
-            // would cap at, even though the grant gate denied.
-            cap_bps_for(eval_fact.price_microusd),
+            // would cap at, even though the grant gate denied. Delegated
+            // to the policy crate to avoid drift.
+            select_release_band_bps(eval_fact.price_microusd),
             format!("Deny:{}", reason_name(reason)),
         ),
     };
@@ -265,22 +273,6 @@ fn build(
         amount,
         band_bps,
         verdict,
-    }
-}
-
-fn cap_for_price(allocation_lovelace: u64, price_microusd: u64) -> u64 {
-    let bps = cap_bps_for(price_microusd);
-    let cap = (u128::from(allocation_lovelace) * u128::from(bps)) / 10_000;
-    u64::try_from(cap).unwrap_or(u64::MAX)
-}
-
-fn cap_bps_for(price_microusd: u64) -> u64 {
-    if price_microusd >= 500_000 {
-        10_000
-    } else if price_microusd >= 350_000 {
-        7_500
-    } else {
-        5_000
     }
 }
 
@@ -349,12 +341,10 @@ fn parse_args() -> Result<Args, String> {
                     .map_err(|_| format!("invalid --allocation-lovelace '{v}'"))?;
             }
             "--allow-intent-out" => {
-                allow_intent_out =
-                    Some(it.next().ok_or("--allow-intent-out needs a value")?.into())
+                allow_intent_out = Some(it.next().ok_or("--allow-intent-out needs a value")?.into())
             }
             "--allow-result-out" => {
-                allow_result_out =
-                    Some(it.next().ok_or("--allow-result-out needs a value")?.into())
+                allow_result_out = Some(it.next().ok_or("--allow-result-out needs a value")?.into())
             }
             "--deny-intent-out" => {
                 deny_intent_out = Some(it.next().ok_or("--deny-intent-out needs a value")?.into())

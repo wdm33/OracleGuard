@@ -138,6 +138,8 @@ load_live_kv() {
   while IFS='=' read -r k v; do
     [ -z "$k" ] && continue
     case "$k" in
+      live_cap_lovelace)          LIVE_CAP_LOVELACE="$v" ;;
+      live_band_bps)              LIVE_BAND_BPS="$v" ;;
       allow_intent_id)            ALLOW_INTENT_ID="$v" ;;
       allow_amount_lovelace)      ALLOW_AMOUNT_LOVELACE="$v" ;;
       allow_band_bps)             ALLOW_BAND_BPS="$v" ;;
@@ -449,11 +451,11 @@ else
   # computed from live Charli3 data against the fixed policy.
   if [ -n "${ALLOW_AMOUNT_LOVELACE:-}" ]; then
     step "Active band + scenario amounts (live-derived)" \
-         "The fixed policy applies to current market conditions. Live oracle price sets the active band; band's basis-points cap scopes how much of the 1000 ADA allocation can be released right now. Allow = 80% of cap (should Authorize); Deny = 110% of cap (should Deny ReleaseCapExceeded)." \
+         "The fixed policy applies to current market conditions. Live oracle price sets the active band (selected by the policy crate); the band's basis-points cap scopes how much of the 1000 ADA allocation can be released right now. Allow = 80% of cap (should Authorize); Deny = 110% of cap (should Deny ReleaseCapExceeded). All values below were emitted by build_live_scenario — the policy crate is the single source of truth for cap math." \
          "cat <<EOF
 live oracle price   : ${ORACLE_PRICE_MICROUSD} microusd  (~\$$((ORACLE_PRICE_MICROUSD / 1_000_000)).$(printf '%03d' $(((ORACLE_PRICE_MICROUSD % 1_000_000) / 1_000))))
 oracle expiry (ms)  : ${ORACLE_EXPIRY_MS}
-active band         : ${ALLOW_BAND_BPS} bps   (cap = $((1_000_000_000 * ALLOW_BAND_BPS / 10_000 / 1_000_000)) ADA of the 1000 ADA allocation)
+active band         : ${LIVE_BAND_BPS} bps   (cap = $((LIVE_CAP_LOVELACE / 1_000_000)) ADA of the 1000 ADA allocation)
 
 allow scenario
   request           : $((ALLOW_AMOUNT_LOVELACE / 1_000_000)) ADA  (${ALLOW_AMOUNT_LOVELACE} lovelace)
@@ -579,8 +581,8 @@ step "Offline verifier: walk each recorded evidence bundle" \
 
 if [ "$ROTATE" = 1 ]; then
   step "Policy rotation: original vs rotated policy_ref" \
-       "Raise release_cap_basis_points from 7500 to 10000 and re-canonicalize. A rule change is observable as a new 32-byte policy_ref." \
-       "python3 scripts/rotated_policy_ref.py --cap-bps 10000"
+       "Raise release_cap_basis_points from 7500 to 10000 and re-canonicalize. A rule change is observable as a new 32-byte policy_ref. Canonicalization + derivation are done by the schemas crate's real functions, not re-implemented here." \
+       "cargo run -p oracleguard-schemas --example show_policy_ref --release --quiet -- --cap-bps 10000"
 fi
 
 # ==============================================================
