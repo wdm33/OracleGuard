@@ -3,34 +3,45 @@
 #
 # Drives the real end-to-end path, step by step. Every step shows the
 # actual command that produces its result; default mode runs through
-# automatically, -i/--interactive waits for the presenter to hit
+# automatically, -i / --interactive waits for the presenter to hit
 # ENTER before running each command.
 #
-# Phases (each may be several steps):
+# PHASES (each may produce several numbered steps):
 #
-#   1. policy      — show the policy JSON; derive policy_ref
-#   2. balances    — query live Kupo for pool + receiver balances
-#   3. oracle      — fetch the Charli3 AggState UTxO via Kupo
-#   4. scenarios   — run smoke.sh allow + smoke.sh deny against a
-#                    4-node Ziranity devnet
-#   5. settle      — if allow passed, submit a real Cardano Preprod
-#                    disbursement tx via scripts/cardano_disburse.py,
-#                    then re-query the receiver's balance
-#   6. verify      — replay recorded evidence bundles through the
-#                    offline verifier
-#   7. rotate      — (optional) show that raising the cap produces a
-#                    new policy_ref
+#   0. session  — show POOL_MNEMONIC load status (never the value)
+#   1. policy   — show the policy JSON; derive policy_ref
+#   2. balances — query live Kupo for pool + receiver balances
+#   3. oracle   — fetch the Charli3 AggState UTxO via Kupo
+#   4. consensus— run allow + deny scenarios against a 4-node
+#                 Ziranity BFT devnet (underlying driver: smoke.sh)
+#   5. settle   — if allow passed, submit a real Cardano Preprod
+#                 disbursement via scripts/cardano_disburse.py, then
+#                 re-query the receiver's balance
+#   6. verify   — replay recorded evidence bundles through the
+#                 offline verifier
+#   7. rotate   — (optional) show that raising the cap produces a
+#                 new policy_ref
 #
 # USAGE
-#   scripts/demo.sh                        # full live demo, auto-paced
-#   scripts/demo.sh -i                     # interactive (wait on ENTER)
-#   scripts/demo.sh --dry                  # no devnet, no settlement
-#   scripts/demo.sh -i --dry --rotate      # rehearsal narration
+#   scripts/demo.sh [flags]
 #
-# PREREQ (for live mode)
+# FLAGS
+#   -i, --interactive   pause for ENTER before/after each step
+#   --dry               skip phase 4 (consensus) + phase 5 (settle)
+#   --rotate            add phase 7 (policy rotation)
+#   -h, --help          print this help and exit
+#
+# EXAMPLES
+#   scripts/demo.sh                        # full live demo, auto-paced
+#   scripts/demo.sh -i                     # interactive, full live
+#   scripts/demo.sh --dry                  # no devnet, no settlement
+#   scripts/demo.sh -i --dry --rotate      # offline narration rehearsal
+#
+# PREREQ (for live mode; --dry works without any of these)
 #   - ~/.local/opt/ziranity-v1.1.0-oracleguard-linux-x86_64/config/smoke.sh
-#   - .venv/bin/python with pycardano   (see scripts/preflight.sh)
-#   - POOL_MNEMONIC exported            (needed only for §5 settlement)
+#   - .venv/bin/python with pycardano      (see scripts/preflight.sh)
+#   - POOL_MNEMONIC exported               (for the settlement phase)
+#   - Hackathon Ogmios + Kupo reachable at 35.209.192.203:1337 / :1442
 
 set -euo pipefail
 
@@ -57,7 +68,14 @@ for a in "$@"; do
     --dry)            DRY=1 ;;
     --rotate)         ROTATE=1 ;;
     --help|-h)
-      sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
+      # Print the banner comment (everything between line 2 and the
+      # first blank-then-`set` line) with the leading "# " stripped.
+      awk '
+        NR==1          { next }
+        /^set -/       { exit }
+        /^#/           { sub(/^# ?/, ""); print; next }
+        /^[[:space:]]*$/ { print; next }
+      ' "$0"
       exit 0 ;;
     *) echo "unknown flag: $a" >&2; exit 2 ;;
   esac
