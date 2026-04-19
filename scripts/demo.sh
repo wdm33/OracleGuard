@@ -450,10 +450,17 @@ else
   # chain: oracle price → active band → cap → scenario amounts. All
   # computed from live Charli3 data against the fixed policy.
   if [ -n "${ALLOW_AMOUNT_LOVELACE:-}" ]; then
+    # Pre-build the "~$0.245" display fragment so it's baked into the
+    # cmd string as a literal. The heredoc below uses a QUOTED
+    # delimiter (<<'BANDMATH') so eval can't re-parse the "$0" inside
+    # and expand it to the script name.
+    LIVE_PRICE_DISPLAY=$(printf '$%d.%03d' \
+      $((ORACLE_PRICE_MICROUSD / 1000000)) \
+      $(((ORACLE_PRICE_MICROUSD % 1000000) / 1000)))
     step "Active band + scenario amounts (live-derived)" \
          "The fixed policy applies to current market conditions. Live oracle price sets the active band (selected by the policy crate); the band's basis-points cap scopes how much of the 1000 ADA allocation can be released right now. Allow = 80% of cap (should Authorize); Deny = 110% of cap (should Deny ReleaseCapExceeded). All values below were emitted by build_live_scenario — the policy crate is the single source of truth for cap math." \
-         "cat <<EOF
-live oracle price   : ${ORACLE_PRICE_MICROUSD} microusd  (~\$$((ORACLE_PRICE_MICROUSD / 1000000)).$(printf '%03d' $(((ORACLE_PRICE_MICROUSD % 1000000) / 1000))))
+         "cat <<'BANDMATH'
+live oracle price   : ${ORACLE_PRICE_MICROUSD} microusd  (~${LIVE_PRICE_DISPLAY})
 oracle expiry (ms)  : ${ORACLE_EXPIRY_MS}
 active band         : ${LIVE_BAND_BPS} bps   (cap = $((LIVE_CAP_LOVELACE / 1000000)) ADA of the 1000 ADA allocation)
 
@@ -466,7 +473,7 @@ deny scenario
   request           : $((DENY_AMOUNT_LOVELACE / 1000000)) ADA  (${DENY_AMOUNT_LOVELACE} lovelace)
   intent_id         : ${DENY_INTENT_ID}
   evaluator verdict : ${DENY_VERDICT}
-EOF" || true
+BANDMATH" || true
   fi
   if step "Consensus run: allow scenario (4-node Ziranity BFT devnet)" \
           "Submit the live-built allow intent to a 4-node Ziranity BFT devnet. PASS means consensus produced canonical AuthorizationResult bytes byte-identical to what our offline evaluator predicted for the same live inputs — reproducibility under BFT." \

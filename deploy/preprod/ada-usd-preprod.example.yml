@@ -29,7 +29,7 @@ tokens:
   reward_token_policy: ""
   reward_token_name: ""
 
-odv_validity_length: 300000
+odv_validity_length: 120000
 
 reference_script:
   address: "addr_test1wrtqtdlqc66rzl2hcjhq5p0dfmalw944pwcne6p5kafthhqtzp03x"
