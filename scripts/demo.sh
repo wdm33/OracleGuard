@@ -382,6 +382,41 @@ run_pull_readiness() {
     probe "Kupo"             0 "($KUPO_URL unreachable)"
   fi
 
+  # charli3 validate-config: structural sanity check on the YAML
+  # (addresses, policy id, validity length, node endpoints). Catches
+  # config drift before we hit Plutus traces. Exits non-zero on any
+  # invalid field; we surface only the SUCCESS/ERROR summary.
+  if [ -x "$REPO_ROOT/.venv/bin/charli3" ] \
+     && [ -f "$REPO_ROOT/deploy/preprod/ada-usd-preprod.example.yml" ]; then
+    if "$REPO_ROOT/.venv/bin/charli3" validate-config \
+        --config "$REPO_ROOT/deploy/preprod/ada-usd-preprod.example.yml" \
+        >/dev/null 2>&1; then
+      probe "charli3 config valid" 1 "(validate-config passed)"
+    else
+      probe "charli3 config valid" 0 "(validate-config rejected — run manually to see errors)"
+    fi
+  fi
+
+  # On-chain time_uncertainty_aggregation: the contract's hard
+  # ceiling for odv_validity_length. Show it so the presenter can
+  # see at a glance whether the YAML value is within bounds.
+  local yaml_validity
+  yaml_validity=$(grep -E '^odv_validity_length:' \
+    "$REPO_ROOT/deploy/preprod/ada-usd-preprod.example.yml" \
+    2>/dev/null | awk '{print $2}')
+  local chain_ceiling
+  chain_ceiling=$("$REPO_ROOT/.venv/bin/python" \
+    "$REPO_ROOT/scripts/show_oracle_settings.py" 2>/dev/null \
+    | grep -oE 'time_uncertainty_aggregation *: [0-9]+' \
+    | grep -oE '[0-9]+' | head -1 || true)
+  if [ -n "$yaml_validity" ] && [ -n "$chain_ceiling" ]; then
+    if [ "$yaml_validity" -le "$chain_ceiling" ]; then
+      probe "validity length" 1 "(yaml=${yaml_validity}ms ≤ chain ceiling=${chain_ceiling}ms)"
+    else
+      probe "validity length" 0 "(yaml=${yaml_validity}ms > chain ceiling=${chain_ceiling}ms)"
+    fi
+  fi
+
   if [ "$fails" = 0 ]; then
     echo "  → all probes passed"
     printf 'live\n\n' > "$PULL_STATE"
