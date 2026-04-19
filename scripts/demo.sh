@@ -101,7 +101,7 @@ STEP_NUM=-1  # so Step 0 prints as "0", not "1"
 # interactive mode we replay it at the end so the full demo remains
 # visible for Q&A even though individual steps clear the screen.
 TRANSCRIPT_FILE=$(mktemp)
-trap 'rm -f "$TRANSCRIPT_FILE" "${PULL_STATE:-}" /tmp/og-charli3-aggregate.out /tmp/og-settle.out /tmp/og-smoke-allow.out /tmp/og-smoke-deny.out' EXIT
+trap 'rm -f "$TRANSCRIPT_FILE" "${PULL_STATE:-}" /tmp/og-charli3-aggregate.out /tmp/og-charli3-txn.cbor /tmp/og-settle.out /tmp/og-smoke-allow.out /tmp/og-smoke-deny.out' EXIT
 
 # step <title> <description> <command>
 # Displays the title, description, and verbatim command. In
@@ -173,7 +173,7 @@ step "Derive policy_ref (sha256 over canonical bytes)" \
 step "Pool wallet balance (before)" \
      "Sum lovelace across every unspent UTxO at the pool address." \
      "curl -sS '$KUPO_URL/matches/$POOL_ADDR?unspent' \
-  | python3 -c 'import json,sys; rs=json.load(sys.stdin); c=sum(r[\"value\"][\"coins\"] for r in rs); print(f\"{c/1_000_000:.6f} tADA  ({c} lovelace, {len(rs)} UTxOs)\")'"
+  | python3 -c 'import json,sys; rs=json.load(sys.stdin); c=sum(r[\"value\"][\"coins\"] for r in rs); print(f\"{c/1_000_000:.6f} tADA  ({c} lovelace, {len(rs)} UTxOs)\")'" || true
 
 # Snapshot receiver balance for the post-settlement delta.
 RECEIVER_BEFORE=$(curl -sS --max-time 10 "$KUPO_URL/matches/$RECEIVER_ADDR?unspent" 2>/dev/null \
@@ -182,7 +182,7 @@ RECEIVER_BEFORE=$(curl -sS --max-time 10 "$KUPO_URL/matches/$RECEIVER_ADDR?unspe
 step "Receiver wallet balance (before)" \
      "Same query against the receiver address." \
      "curl -sS '$KUPO_URL/matches/$RECEIVER_ADDR?unspent' \
-  | python3 -c 'import json,sys; rs=json.load(sys.stdin); c=sum(r[\"value\"][\"coins\"] for r in rs); print(f\"{c/1_000_000:.6f} tADA  ({c} lovelace, {len(rs)} UTxOs)\")'"
+  | python3 -c 'import json,sys; rs=json.load(sys.stdin); c=sum(r[\"value\"][\"coins\"] for r in rs); print(f\"{c/1_000_000:.6f} tADA  ({c} lovelace, {len(rs)} UTxOs)\")'" || true
 
 # ==============================================================
 # 3. CHARLI3 PULL (sanity check → aggregate → narrate)
@@ -282,16 +282,21 @@ fi
 
 if [ "$PULL_MODE" = "live" ]; then
   CHARLI3_TX_ID=""
+  # Clear any stale aggregation tx cbor so charli3 doesn't prompt for
+  # overwrite confirmation mid-demo. -o pins the output to a temp file.
+  rm -f /tmp/og-charli3-txn.cbor /tmp/og-charli3-aggregate.out
+  rm -f "$REPO_ROOT"/odv_transaction_*.cbor 2>/dev/null || true
   step "Charli3 pull: submit aggregation tx (live)" \
-       "On-demand pull: the consumer (us) triggers a fresh aggregation. Oracle nodes sign the price, the aggregator collects + submits the tx." \
-       "timeout 120 $REPO_ROOT/.venv/bin/charli3 aggregate --config deploy/preprod/ada-usd-preprod.example.yml --auto-submit 2>&1 | tee /tmp/og-charli3-aggregate.out | tail -12"
+       "On-demand pull: the consumer (us) triggers a fresh aggregation. Oracle nodes sign the price, the aggregator collects + submits the tx. Output streams as it happens." \
+       "timeout 120 $REPO_ROOT/.venv/bin/charli3 aggregate --config deploy/preprod/ada-usd-preprod.example.yml --auto-submit --output /tmp/og-charli3-txn.cbor 2>&1 | tee /tmp/og-charli3-aggregate.out" || \
+       echo "    (aggregation step did not succeed — continuing; subsequent steps will use whatever AggState is already on chain)"
 
   CHARLI3_TX_ID=$(grep -oE 'tx[_ ]?id[: ]+[0-9a-f]{64}' /tmp/og-charli3-aggregate.out 2>/dev/null \
                   | head -1 | grep -oE '[0-9a-f]{64}' || true)
 
   step "Charli3 pull: wait for Preprod confirmation (~40 s)" \
        "Rollback-safe depth is 2+ blocks. We wait 45 s for the aggregation tx to land before reading the UTxO." \
-       "sleep 45 && echo 'waited 45s'"
+       "sleep 45 && echo 'waited 45s'" || true
 else
   step "Charli3 pull: FALLBACK — live aggregation skipped" \
        "Live pull is not available ($PULL_REASON). What follows is an honest disclosure of what the rest of the demo is and isn't." \
@@ -333,7 +338,7 @@ for r in json.load(sys.stdin):
         print(\"datum_hash :\", r[\"datum_hash\"])
         break
 else:
-    print(\"no AggState UTxO found\")'"
+    print(\"no AggState UTxO found\")'" || true
 
 # ==============================================================
 # 4. SCENARIOS (Ziranity devnet consensus via smoke.sh)
@@ -391,8 +396,10 @@ else
   --destination-length 57 \\
   --amount-lovelace 700000000 \\
   --intent-id $(printf 'dd%.0s' {1..32}) \\
-  | tee /tmp/og-settle.out | tail -1"
-  TX_ID=$(tail -1 /tmp/og-settle.out 2>/dev/null || echo "")
+  2>&1 | tee /tmp/og-settle.out" || true
+  # The helper prints assorted progress lines + a final tx_id line.
+  # Grep for the 64-char hex id so we don't pick up an error message.
+  TX_ID=$(grep -oE '^[0-9a-f]{64}$' /tmp/og-settle.out 2>/dev/null | tail -1 || echo "")
   if ! [[ "$TX_ID" =~ ^[0-9a-f]{64}$ ]]; then
     TX_ID=""
   fi
@@ -400,12 +407,12 @@ else
   if [ -n "$TX_ID" ]; then
     step "Wait for Preprod confirmation" \
          "Rollback-safe depth is 2+ blocks (~40 s); we wait 25 s for one." \
-         "sleep 25 && echo waited 25s"
+         "sleep 25 && echo waited 25s" || true
 
     step "Receiver wallet balance (after)" \
          "Re-query the receiver's UTxOs — balance should be +700 tADA." \
          "curl -sS '$KUPO_URL/matches/$RECEIVER_ADDR?unspent' \
-  | python3 -c 'import json,sys; rs=json.load(sys.stdin); c=sum(r[\"value\"][\"coins\"] for r in rs); print(f\"{c/1_000_000:.6f} tADA  ({c} lovelace, {len(rs)} UTxOs)\")'"
+  | python3 -c 'import json,sys; rs=json.load(sys.stdin); c=sum(r[\"value\"][\"coins\"] for r in rs); print(f\"{c/1_000_000:.6f} tADA  ({c} lovelace, {len(rs)} UTxOs)\")'" || true
 
     if [ -n "$RECEIVER_BEFORE" ]; then
       RECEIVER_AFTER=$(curl -sS --max-time 10 "$KUPO_URL/matches/$RECEIVER_ADDR?unspent" 2>/dev/null \
@@ -414,7 +421,7 @@ else
         DELTA=$(( RECEIVER_AFTER - RECEIVER_BEFORE ))
         step "Delta vs pre-settlement snapshot" \
              "Difference in lovelace between before and after." \
-             "echo '+$((DELTA / 1000000)).$(printf '%06d' $((DELTA % 1000000))) tADA  ($DELTA lovelace)'"
+             "echo '+$((DELTA / 1000000)).$(printf '%06d' $((DELTA % 1000000))) tADA  ($DELTA lovelace)'" || true
       fi
     fi
   fi
@@ -431,7 +438,7 @@ if [ -n "$TX_ID" ] && [ -n "$ALLOW_HEIGHT" ]; then
   --intent-path integrations/ziranity/fixtures/integration/allow_700_ada_intent.postcard \
   --auth-path   integrations/ziranity/fixtures/integration/allow_700_ada_result.postcard \
   --tx-hash     $TX_ID \
-  --committed-height $ALLOW_HEIGHT"
+  --committed-height $ALLOW_HEIGHT" || true
 else
   reason="no live tx"
   [ -z "$ALLOW_HEIGHT" ] && reason="consensus did not commit"
