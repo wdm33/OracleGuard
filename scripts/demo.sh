@@ -62,8 +62,32 @@ SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SO
 REPO_ROOT="$(cd "$(dirname "$SCRIPT_PATH")/.." && pwd)"
 cd "$REPO_ROOT"
 
-SMOKE="$HOME/.local/opt/ziranity-v1.1.0-oracleguard-linux-x86_64/config/smoke.sh"
+ZIRANITY_BUNDLE="$HOME/.local/opt/ziranity-v1.1.0-oracleguard-linux-x86_64"
+SMOKE="$ZIRANITY_BUNDLE/config/smoke.sh"
 VENV_PY="$REPO_ROOT/.venv/bin/python"
+
+# smoke.sh hardcodes a sibling-directory layout (ziranity-v3 and
+# OracleGuard at the same level, with ziranity built at
+# target/release/). The handover bundle is flatter than that. Build a
+# throwaway symlink tree that satisfies smoke.sh's path assumptions
+# so we can run it in-place without modifying the handover bundle.
+setup_smoke_workdir() {
+  [ -n "${SMOKE_WORKDIR:-}" ] && [ -d "$SMOKE_WORKDIR" ] && return 0
+  SMOKE_WORKDIR=$(mktemp -d -t og-demo-smoke-XXXXXX)
+  local zr="$SMOKE_WORKDIR/ziranity-v3"
+  local sd="$zr/deploy/devnet/oracleguard-smoke"
+  mkdir -p "$zr/target/release" "$sd"
+  ln -sf "$ZIRANITY_BUNDLE/bin/ziranity"              "$zr/target/release/ziranity"
+  ln -sf "$ZIRANITY_BUNDLE/bin/ziranity-node"         "$zr/target/release/ziranity-node"
+  ln -sf "$ZIRANITY_BUNDLE/config/devnet.toml"        "$sd/devnet.toml"
+  ln -sf "$ZIRANITY_BUNDLE/config/oracleguard-node.toml" "$sd/oracleguard-node.toml"
+  ln -sf "$ZIRANITY_BUNDLE/config/smoke.sh"           "$sd/smoke.sh"
+  ln -sf "$REPO_ROOT"                                  "$SMOKE_WORKDIR/OracleGuard"
+  # The symlinked smoke.sh path is what we invoke; from there it
+  # resolves ZIRANITY_ROOT = $zr and ORACLEGUARD_ROOT = the symlink
+  # to our real checkout.
+  SMOKE_RUNNER="$sd/smoke.sh"
+}
 
 POOL_ADDR="addr_test1qz4f2vac8nn7tp802mxj3cu40a7xhhzc3agut6spq6rpz5rgtlvyed9yn3ncuv3fgaadfmvn64d7egjn824t7pj99xfs4y58d0"
 RECEIVER_ADDR="addr_test1qq8wq0j9kpwkyf0tw9pa903r5wux9x6dneskyxanpt7v2w54ga88n5ff3553ugq29jyflcfmjau9e3qj093fmxw0hp7sht3w87"
@@ -101,7 +125,7 @@ STEP_NUM=-1  # so Step 0 prints as "0", not "1"
 # interactive mode we replay it at the end so the full demo remains
 # visible for Q&A even though individual steps clear the screen.
 TRANSCRIPT_FILE=$(mktemp)
-trap 'rm -f "$TRANSCRIPT_FILE" "${PULL_STATE:-}" /tmp/og-charli3-aggregate.out /tmp/og-charli3-txn.cbor /tmp/og-settle.out /tmp/og-smoke-allow.out /tmp/og-smoke-deny.out' EXIT
+trap 'rm -f "$TRANSCRIPT_FILE" "${PULL_STATE:-}" /tmp/og-charli3-aggregate.out /tmp/og-charli3-txn.cbor /tmp/og-settle.out /tmp/og-smoke-allow.out /tmp/og-smoke-deny.out; rm -rf "${SMOKE_WORKDIR:-}"' EXIT
 
 # step <title> <description> <command>
 # Displays the title, description, and verbatim command. In
@@ -353,14 +377,15 @@ if [ "$DRY" = 1 ] || [ ! -x "$SMOKE" ]; then
   skipped "Consensus run: allow scenario (4-node Ziranity BFT devnet)" "Devnet submit + byte-identity diff ($reason)"
   skipped "Consensus run: deny scenario (4-node Ziranity BFT devnet)"  "Devnet submit + byte-identity diff ($reason)"
 else
+  setup_smoke_workdir
   if step "Consensus run: allow scenario (4-node Ziranity BFT devnet)" \
           "Submit allow_700_ada fixture to a 4-node Ziranity BFT devnet; expect PASS (committed output bytes match the recorded fixture)." \
-          "'$SMOKE' allow 2>&1 | tee /tmp/og-smoke-allow.out"; then
+          "'$SMOKE_RUNNER' allow --no-build 2>&1 | tee /tmp/og-smoke-allow.out"; then
     ALLOW_OK=1
   fi
   if step "Consensus run: deny scenario (4-node Ziranity BFT devnet)" \
           "Submit deny_900_ada fixture; expect PASS with the 3-byte Denied(ReleaseCapExceeded) envelope." \
-          "'$SMOKE' deny 2>&1 | tee /tmp/og-smoke-deny.out"; then
+          "'$SMOKE_RUNNER' deny --no-build 2>&1 | tee /tmp/og-smoke-deny.out"; then
     DENY_OK=1
   fi
 fi
